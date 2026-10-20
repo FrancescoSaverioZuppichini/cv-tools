@@ -1,0 +1,13 @@
+.venv/
+.models/
+engines/
+runs/
+inputs/
+runtime-deps/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+*.pyc
+.DS_Store
+setup.log
