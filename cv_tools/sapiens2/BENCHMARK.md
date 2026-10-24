@@ -23,19 +23,18 @@ Quality checks against the **new every-frame GPU run** reproduce the earlier CPU
 **Use 10 FPS + linear for the measured real-time-throughput mode; use 15 FPS + linear for lower interpolation error, or every-frame inference for detail.** The 10 FPS result has about 5.8% throughput headroom on this clip, not a guarantee for every video. Interpolation still adds lookahead and this is not a zero-latency live-stream benchmark. Full resolution/every-frame inference remains the default.
 
 ```bash
-cv-sapiens2 --input inputs/seedance-shopping-reference-6s.mp4 \
-  --inference-fps 10 --interpolate linear
+python -m cv_tools.sapiens2.pose --input inputs/seedance-shopping-reference-6s.mp4 --inference-fps 10
 
 # Reproduce one configuration, five warmup passes and two complete runs.
-cv-sapiens2 --input inputs/seedance-shopping-reference-6s.mp4 \
-  --inference-fps 10 --interpolate linear --frames 180 --benchmark
+python -m cv_tools.sapiens2.pose --input inputs/seedance-shopping-reference-6s.mp4 \
+  --inference-fps 10 --frames 180 --benchmark
 ```
 
 Raw runs: `runs/gpu-idle-every-frame/`, `runs/gpu-idle-15-linear/`, and `runs/gpu-idle-10-linear/`. Each includes `summary.json`, `gpu-monitor.json`, both measured runs and browser-playable `preview.mp4`/`skeleton.mp4`. Sampled configurations also include `quality-vs-every-frame.json`.
 
 ## Earlier optimization experiments
 
-First 30 frames of the same clip. Five warmup batches, two measured runs. These historical rows precede the final output-worker implementation and are not the current pipeline's speed.
+First 30 frames of the same clip. Five warmup batches, two measured runs. These historical rows precede the final output-worker implementation and are not the current pipeline's speed. The `compile`, `channels-last` and batch-2 backends were removed afterwards; TensorRT beat all of them.
 
 | Configuration | Model input H×W | Forward mean ms/frame | Pipeline run 1 | Pipeline run 2 | Pipeline mean ms/frame | FPS | Speedup vs HF |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -101,7 +100,7 @@ Recommendation: **15 FPS + linear interpolation** is the better optional general
 
 An initial 10 FPS GPU test reported 10.977/10.951 s for two 180-frame runs (16.42 output FPS), but a concurrent ComfyUI process occupied approximately 20 GB VRAM and 100% GPU utilization. That result is **contended and excluded from accepted speed comparisons**. GPU testing was paused at the user's request, then resumed with permission once the GPU was idle. See the verified current-pipeline results at the top of this file.
 
-CPU tests cover irregular and 29.97 FPS timestamps, first/final anchors, frame retention, partial batches, weak/off-frame endpoint suppression, output ordering, and propagation of encoder failures.
+CPU tests cover irregular and 29.97 FPS timestamps, first/final anchors, frame retention, weak/off-frame endpoint suppression, output ordering, and propagation of encoder failures.
 
 Raw CPU replay summaries and videos are saved in `runs/cpu-replay-10/` and `runs/cpu-replay-15/` in the workstation checkout. Sampled `--benchmark` runs measure two complete pipeline runs and skip the separate forward-only microbenchmark.
 
