@@ -8,6 +8,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.depth_anything` | [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) small/base/large | relative depth map |
 | `python -m cv_tools.sam3` | [Meta SAM 3](https://huggingface.co/facebook/sam3) | text-prompted instance masks, tracked across video frames |
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
+| `python -m cv_tools.canny` | OpenCV Canny, auto thresholds | edge map (white on black), image or video |
 
 Every file takes `--help`.
 
@@ -21,6 +22,7 @@ python -m cv_tools.sapiens2.pose --input inputs/seedance-shopping-reference-6s.m
 python -m cv_tools.depth_anything --input photo.jpg
 python -m cv_tools.sam3 --input clip.mp4 --prompt person "shopping bag"
 python -m cv_tools.palette --input photo.jpg
+python -m cv_tools.canny --input photo.jpg
 ```
 
 ## Model tools: shared flags and outputs
@@ -185,3 +187,20 @@ python -m unittest discover -s tests
 ```
 
 The inference, export and CLI code is our own on top of Transformers' model implementations; it does not import community inference repositories. Sapiens2 landmark metadata derives from Meta's pose dataset configuration and keeps its license.
+
+## Canny · edge map
+
+```bash
+python -m cv_tools.canny --input photo.jpg                    # auto thresholds from the median brightness
+python -m cv_tools.canny --input clip.mp4 --low 50 --high 150 # fixed thresholds
+```
+
+| Flag | Meaning |
+|---|---|
+| `--low N` / `--high N` | Hysteresis thresholds; default auto: (1 ± sigma) × median brightness |
+| `--sigma 0.33` | Spread of the auto thresholds around the median |
+| `--blur 5` | Odd Gaussian kernel before edge detection, so skin and fabric texture do not become speckle; `0` disables |
+| `--frames N` | Frame limit for videos; default all |
+
+Outputs `canny.png` (image) or `canny.mp4` (video, source FPS) and `edges.jsonl` (per frame: the thresholds used and the edge pixel count). CPU only, no model download.
+
