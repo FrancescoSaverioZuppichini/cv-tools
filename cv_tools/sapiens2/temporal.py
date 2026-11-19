@@ -37,7 +37,7 @@ def between(left, right, frame, threshold):
 
 
 def predictions(pose, args, fps):
-    frames = read_frames(args.input, args.frames, fps)
+    frames = read_frames(args.input, args.frames, fps, args.size)
     if args.inference_fps is None or args.is_image:
         yield from (infer(pose, frame) for frame in frames)
         return

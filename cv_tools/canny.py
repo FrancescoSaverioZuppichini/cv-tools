@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from cv_tools import ROOT
-from cv_tools.media import IMAGE_SUFFIXES, get_fps, read_frames, write_run
+from cv_tools.media import IMAGE_SUFFIXES, get_fps, parse_size, read_frames, write_run
 
 
 def edges(image, low, high, sigma, blur):
@@ -32,6 +32,7 @@ def main():
     p.add_argument("--sigma", type=float, default=0.33, help="Auto-threshold spread around the median (default: 0.33)")
     p.add_argument("--blur", type=int, default=5, help="Gaussian blur kernel before edges, odd; 0 disables (default: 5)")
     p.add_argument("--frames", type=int, default=0, help="Frame limit for videos; default: all")
+    p.add_argument("--size", type=parse_size, help="Resize input frames first: 0.5 (scale), 1mp (megapixels) or 720x1280")
     args = p.parse_args()
     args.input = args.input.expanduser().resolve()
     if not args.input.is_file():
@@ -50,7 +51,7 @@ def main():
                   "edge_pixels": int(np.count_nonzero(edge))}
         return record, {("canny.png" if is_image else "canny.mp4"): edge if is_image else cv2.cvtColor(edge, cv2.COLOR_GRAY2BGR)}
 
-    stats = write_run(out, read_frames(args.input, args.frames, fps), render, fps, "edges.jsonl")
+    stats = write_run(out, read_frames(args.input, args.frames, fps, args.size), render, fps, "edges.jsonl")
     print(f"canny: {stats['frames']} frames, {stats['fps']:.1f} FPS -> {out}")
 
 

@@ -26,7 +26,7 @@ def predict(model, image, args):
     # [Agent] Resize and normalize on the GPU: the HF processor's PIL bicubic resize takes ~6 ms per 720p frame
     # [Agent] on CPU, half the small model's forward. Output matches it (Pearson 0.99998). BGR flips to RGB here.
     pixels = torch.from_numpy(image).to(args.device).permute(2, 0, 1)[None].flip(1).float() / 255
-    pixels = F.interpolate(pixels, args.size, mode="bicubic", align_corners=False, antialias=True)
+    pixels = F.interpolate(pixels, args.model_hw, mode="bicubic", align_corners=False, antialias=True)
     mean = torch.tensor(MEAN, device=args.device).view(1, 3, 1, 1)
     std = torch.tensor(STD, device=args.device).view(1, 3, 1, 1)
     depth = model(pixel_values=((pixels - mean) / std).to(model.dtype)).predicted_depth
@@ -52,7 +52,7 @@ def process(model, args, destination, fps):
                             "depth.npy": depth}
         return record, {"depth.mp4": cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), "color.mp4": color}
 
-    items = ((frame, predict(model, frame.image, args)) for frame in read_frames(args.input, args.frames, fps))
+    items = ((frame, predict(model, frame.image, args)) for frame in read_frames(args.input, args.frames, fps, args.size))
     return write_run(destination, items, render, fps, "depth.jsonl")
 
 
@@ -65,13 +65,13 @@ def run(args):
         raise SystemExit(f"No checkpoint at {args.model}; see README › Installation")
     torch.set_num_threads(4)
     cv2.setNumThreads(1)
-    first = next(read_frames(args.input, 1)).image
+    first = next(read_frames(args.input, 1, size=args.size)).image
     h, w = first.shape[:2]
     scale = args.resolution / min(h, w)
     # [Agent] Short side to --resolution, long side keeps the aspect ratio; both snap to the 14-pixel ViT patch.
-    args.size = (max(14, round(h * scale / 14) * 14), max(14, round(w * scale / 14) * 14))
+    args.model_hw = (max(14, round(h * scale / 14) * 14), max(14, round(w * scale / 14) * 14))
     dtype = torch.float32 if args.device == "cpu" else torch.float16
-    print(f"depth-anything: {args.device}, {args.model.name}, model input {args.size[0]}x{args.size[1]}", flush=True)
+    print(f"depth-anything: {args.device}, {args.model.name}, model input {args.model_hw[0]}x{args.model_hw[1]}", flush=True)
     if args.device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
@@ -86,7 +86,7 @@ def run(args):
     warmup_seconds = time.perf_counter() - started
     fps = get_fps(args.input)
     runs = measure(args, lambda destination: process(model, args, destination, fps))
-    summary = {"model": str(args.model), "dtype": str(dtype), "size_hw": args.size, "colormap": args.colormap,
+    summary = {"model": str(args.model), "dtype": str(dtype), "size_hw": args.model_hw, "colormap": args.colormap,
                "load_seconds": load_seconds, "warmup_seconds": warmup_seconds,
                "warmup_passes": args.warmup}
     write_summary(args, summary, runs, fps)

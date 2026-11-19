@@ -10,7 +10,7 @@ import torch
 import transformers
 
 from cv_tools import ROOT
-from cv_tools.media import IMAGE_SUFFIXES
+from cv_tools.media import IMAGE_SUFFIXES, parse_size
 
 
 def parse(parser, tool):
@@ -19,6 +19,7 @@ def parse(parser, tool):
     parser.add_argument("--frames", type=int, help="Frame limit; default: all, or 30 when benchmarking")
     parser.add_argument("--benchmark", action="store_true", help="Two measured runs instead of one")
     parser.add_argument("--warmup", type=int, default=5, help="Warmup passes on the first frame (default: 5)")
+    parser.add_argument("--size", type=parse_size, help="Resize input frames first: 0.5 (scale), 1mp (megapixels) or 720x1280")
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto",
                         help="auto selects MPS on macOS and CUDA on Linux; CPU must be requested explicitly")
     args = parser.parse_args()

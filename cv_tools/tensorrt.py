@@ -45,7 +45,7 @@ class Engine:
 def create_engine(model, output, size, path):
     import tensorrt as trt
 
-    print(f"Building TensorRT engine {path.name}, once per model and input size", flush=True)
+    print(f"Building TensorRT engine {path.name}, once per model, input size and TensorRT version", flush=True)
     started = time.perf_counter()
     path.parent.mkdir(parents=True, exist_ok=True)
     # [Agent] The ONNX export is only a build input and weighs as much as the model; keep it in a temp dir.
@@ -59,24 +59,13 @@ def create_engine(model, output, size, path):
         torch.cuda.empty_cache()
         logger = trt.Logger(trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        # [Agent] Strongly typed: every tensor keeps the dtype of the FP16 export, so the spots where HF upcasts to FP32
+        # (RMSNorm, the attention softmax) stay FP32 in the engine without pinning layers by hand.
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         parser = trt.OnnxParser(network, logger)
         if not parser.parse_from_file(onnx):
             raise RuntimeError("\n".join(str(parser.get_error(i)) for i in range(parser.num_errors)))
         config = builder.create_builder_config()
-        config.set_flag(trt.BuilderFlag.FP16)
-        config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-        # [Agent] HF accumulates normalization and softmax in float32. Weakly typed FP16 builds may otherwise
-        # [Agent] downcast those reductions and visibly move outputs even though inference stays finite.
-        for index in range(network.num_layers):
-            layer = network.get_layer(index)
-            if layer.type in {trt.LayerType.CONSTANT, trt.LayerType.SHAPE, trt.LayerType.CAST}:
-                continue
-            float_outputs = [i for i in range(layer.num_outputs) if layer.get_output(i).dtype == trt.float32]
-            if float_outputs or layer.type in {trt.LayerType.NORMALIZATION, trt.LayerType.SOFTMAX}:
-                layer.precision = trt.float32
-                for i in float_outputs:
-                    layer.set_output_type(i, trt.float32)
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 * 2**30)
         config.builder_optimization_level = 3
         engine = builder.build_serialized_network(network, config)

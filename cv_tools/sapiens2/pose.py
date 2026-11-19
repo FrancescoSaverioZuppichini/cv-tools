@@ -1,6 +1,8 @@
 """Sapiens2 pose: 308 body, face, hand and foot landmarks"""
 import argparse
+import colorsys
 import json
+import math
 import re
 import time
 from collections import Counter
@@ -28,6 +30,19 @@ LANDMARK_GROUPS = {
     "feet": [13, 14] + list(range(15, 21)),
 }
 RESOLUTIONS = {"full": (1024, 768), "half": (512, 384), "quarter": (256, 192)}
+
+# [Agent] --style dwpose draws the same Sapiens2 points the way DWPose / OpenPose control maps look: OpenPose-18 body with its fixed
+# [Agent] per-limb colours (that is how pose ControlNets tell left from right and bone from bone), 21-point rainbow hands, white face dots.
+# [Agent] Pose control LoRAs are trained on that picture, not on coordinates, so the Sapiens drawing has to speak their visual language.
+OPENPOSE_BODY = ["nose", "neck", "right_shoulder", "right_elbow", "right_wrist", "left_shoulder", "left_elbow", "left_wrist", "right_hip", "right_knee",
+                 "right_ankle", "left_hip", "left_knee", "left_ankle", "right_eye", "left_eye", "right_ear", "left_ear"]
+OPENPOSE_LIMBS = [(1, 2), (1, 5), (2, 3), (3, 4), (5, 6), (6, 7), (1, 8), (8, 9), (9, 10), (1, 11), (11, 12), (12, 13), (1, 0), (0, 14), (14, 16), (0, 15), (15, 17)]
+OPENPOSE_COLORS = [(255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 255, 0), (85, 255, 0), (0, 255, 0), (0, 255, 85), (0, 255, 170), (0, 255, 255),
+                   (0, 170, 255), (0, 85, 255), (0, 0, 255), (85, 0, 255), (170, 0, 255), (255, 0, 255), (255, 0, 170), (255, 0, 85)]
+HAND_FINGERS = ["thumb", "forefinger", "middle_finger", "ring_finger", "pinky_finger"]
+HAND_EDGES = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (0, 9), (9, 10), (10, 11), (11, 12), (0, 13), (13, 14), (14, 15), (15, 16),
+              (0, 17), (17, 18), (18, 19), (19, 20)]
+FACE_PARTS = ("eyebrow", "lash_line", "nose", "lip", "nostril", "mouth")
 
 
 def resolution(value):
@@ -63,6 +78,11 @@ class Pose:
         lookup = {name: index for index, name in enumerate(self.names)}
         self.edges = [(lookup[e["link"][0]], lookup[e["link"][1]], tuple(reversed(e["color"])))
                       for e in metadata["skeleton"].values() if all(n in lookup for n in e["link"])]
+        self.openpose_body = [lookup.get(n) for n in OPENPOSE_BODY]
+        self.openpose_hands = [[lookup.get(f"{side}_wrist")] + [lookup.get(f"{side}_{finger}{joint}") for finger in HAND_FINGERS for joint in ("_third_joint", "2", "3", "4")]
+                               for side in ("left", "right")]
+        # [Agent] Face: brows, eyes, nose and lips only; Sapiens2 has no jaw contour, so this is the "no jaw" face DWPose users strip by hand.
+        self.openpose_face = [i for i, n in enumerate(self.names) if any(part in n for part in FACE_PARTS) and not n.startswith(("left_", "right_"))]
         self.mean = torch.tensor(self.processor.image_mean, device=args.device).view(1, 3, 1, 1)
         self.std = torch.tensor(self.processor.image_std, device=args.device).view(1, 3, 1, 1)
         self.grids = {}
@@ -82,13 +102,19 @@ class Pose:
         grid = torch.stack([2 * ix / (w - 1) - 1, 2 * iy / (h - 1) - 1], dim=-1)
         return grid, "bilinear" if min(sx.item(), sy.item()) < 1 else "bicubic"
 
-    def predict(self, image):
+    def predict(self, image, box=None):
+        """(keypoints, scores, box) of the person in box (x, y, w, h); default: the CLI's --box, else the whole frame."""
         h, w = image.shape[:2]
-        box = self.args.box or [0, 0, w, h]
-        if (h, w) not in self.grids:
-            self.grids[h, w] = self.get_grid(h, w, box)
-        grid, mode = self.grids[h, w]
-        pixels = torch.from_numpy(image).to(self.args.device).permute(2, 0, 1)[None].flip(1).float()
+        if box is None:
+            # [Agent] The CLI's box is fixed for the whole run, so its crop grid is built once per frame size.
+            box = self.args.box or [0, 0, w, h]
+            if (h, w) not in self.grids:
+                self.grids[h, w] = self.get_grid(h, w, box)
+            grid, mode = self.grids[h, w]
+        else:
+            grid, mode = self.get_grid(h, w, box)
+        # [Agent] as_tensor: a frame already on the GPU is used in place; a NumPy frame is uploaded.
+        pixels = torch.as_tensor(image, device=self.args.device).permute(2, 0, 1)[None].flip(1).float()
         crop = torch.nn.functional.grid_sample(pixels, grid, mode=mode, padding_mode="zeros", align_corners=True)
         heatmaps = self.forward(((crop * self.processor.rescale_factor - self.mean) / self.std).to(self.dtype))
         # [Agent] HF's DARK sub-pixel refinement runs where the heatmaps are; only 308 points leave the GPU.
@@ -96,7 +122,47 @@ class Pose:
                                                              boxes=[[box]])[0][0]
         return result["keypoints"].cpu().numpy(), result["scores"].cpu().numpy(), box
 
+    def draw_dwpose(self, frame, points, scores):
+        canvas = np.zeros_like(frame)
+        h, w = frame.shape[:2]
+
+        def ok(i):
+            return (i is not None and scores[i] >= self.args.threshold and np.isfinite(points[i]).all()
+                    and 0 <= points[i][0] < w and 0 <= points[i][1] < h)
+
+        def bgr(rgb, scale=1.0):
+            return tuple(int(c * scale) for c in reversed(rgb))
+
+        body = self.openpose_body
+        for k, (a, b) in enumerate(OPENPOSE_LIMBS):
+            if ok(body[a]) and ok(body[b]):
+                (x1, y1), (x2, y2) = points[body[a]], points[body[b]]
+                # [Agent] Limbs as filled ellipses at 60 % colour, joints as full-colour dots, as in the OpenPose renderer the control LoRAs saw.
+                length, angle = math.hypot(x1 - x2, y1 - y2), math.degrees(math.atan2(y1 - y2, x1 - x2))
+                polygon = cv2.ellipse2Poly((int((x1 + x2) / 2), int((y1 + y2) / 2)), (int(length / 2), 4), int(angle), 0, 360, 1)
+                cv2.fillConvexPoly(canvas, polygon, bgr(OPENPOSE_COLORS[k], 0.6))
+        for k, i in enumerate(body):
+            if ok(i):
+                cv2.circle(canvas, (int(points[i][0]), int(points[i][1])), 4, bgr(OPENPOSE_COLORS[k]), -1)
+        for hand in self.openpose_hands:
+            for k, (a, b) in enumerate(HAND_EDGES):
+                if ok(hand[a]) and ok(hand[b]):
+                    color = tuple(int(c * 255) for c in colorsys.hsv_to_rgb(k / len(HAND_EDGES), 1.0, 1.0))
+                    cv2.line(canvas, tuple(int(v) for v in points[hand[a]]), tuple(int(v) for v in points[hand[b]]), bgr(color), 2)
+            for i in hand:
+                if ok(i):
+                    cv2.circle(canvas, (int(points[i][0]), int(points[i][1])), 4, bgr((0, 0, 255)), -1)
+        for i in self.openpose_face:
+            if ok(i):
+                cv2.circle(canvas, (int(points[i][0]), int(points[i][1])), 3, (255, 255, 255), -1)
+        overlay = frame.copy()
+        drawn = canvas.any(axis=2)
+        overlay[drawn] = canvas[drawn]
+        return canvas, overlay
+
     def draw(self, frame, points, scores):
+        if self.args.style == "dwpose":
+            return self.draw_dwpose(frame, points, scores)
         guide = np.zeros_like(frame)
         overlay = frame.copy()
         h, w = frame.shape[:2]
@@ -136,6 +202,32 @@ def process(pose, args, destination, fps):
             "actual_inference_fps": None if args.is_image else kinds["inferred"] * fps / stats["frames"]}
 
 
+def pose_model(name):
+    """A size (0.4b, 0.8b, 1b, 5b) means .models/sapiens2-pose-<size>; anything with a slash is a checkpoint path."""
+    name = str(name)
+    path = Path(name).expanduser() if "/" in name else MODEL_DIR / f"sapiens2-pose-{name.lower()}"
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError(f"no checkpoint at {path}; download it with: "
+                                         f"hf download facebook/{path.name} --local-dir {path}")
+    return path
+
+
+def pose_engine(model, resolution):
+    """The TensorRT engine for this checkpoint and model input, built on first use (a couple of minutes). Returns (path, build seconds)."""
+    import tensorrt
+
+    h, w = resolution
+    # [Agent] A plan only loads in the TensorRT version that built it; with the version in the name an upgrade builds a fresh one.
+    engine = ENGINE_DIR / f"{model.name}-{h}x{w}-trt{tensorrt.__version__}.plan"
+    if engine.exists():
+        return engine, 0.0
+    started = time.perf_counter()
+    create_engine(AutoModelForPoseEstimation.from_pretrained(
+        model, local_files_only=True, dtype=torch.float16, attn_implementation="sdpa").cuda().eval(),
+        "heatmaps", resolution, engine)
+    return engine, time.perf_counter() - started
+
+
 @torch.inference_mode()
 def run(args):
     if args.box and (not all(np.isfinite(args.box)) or min(args.box[2:]) <= 0):
@@ -145,15 +237,8 @@ def run(args):
     torch.set_num_threads(4)
     cv2.setNumThreads(1)
     h, w = args.resolution
-    args.engine = ENGINE_DIR / f"{args.model.name}-{h}x{w}.plan"
-    print(f"sapiens2: {args.device}, {'tensorrt' if args.device == 'cuda' else 'torch'}, model input {h}x{w}", flush=True)
-    build_seconds = 0.0
-    if args.device == "cuda" and not args.engine.exists():
-        started = time.perf_counter()
-        create_engine(AutoModelForPoseEstimation.from_pretrained(
-            args.model, local_files_only=True, dtype=torch.float16, attn_implementation="sdpa").cuda().eval(),
-            "heatmaps", args.resolution, args.engine)
-        build_seconds = time.perf_counter() - started
+    print(f"sapiens2: {args.device}, {'tensorrt' if args.device == 'cuda' else 'torch'}, {args.model.name}, model input {h}x{w}", flush=True)
+    args.engine, build_seconds = pose_engine(args.model, args.resolution) if args.device == "cuda" else (None, 0.0)
     if args.device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     torch.backends.cudnn.benchmark = True
@@ -164,7 +249,7 @@ def run(args):
     started = time.perf_counter()
     pose = Pose(args)
     load_seconds = time.perf_counter() - started
-    first = next(read_frames(args.input, 1)).image
+    first = next(read_frames(args.input, 1, size=args.size)).image
     started = time.perf_counter()
     for _ in range(args.warmup):
         pose.predict(first)
@@ -181,7 +266,8 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", type=Path, default=MODEL_DIR / "sapiens2-pose-0.4b")
+    p.add_argument("--model", type=pose_model, default="0.4b",
+                   help="Checkpoint size (0.4b | 0.8b | 1b | 5b, from .models/sapiens2-pose-<size>) or a path (default: 0.4b)")
     p.add_argument("--resolution", type=resolution, default=(1024, 768),
                    help="Model input: full | half | quarter | HxW (default: full, 1024x768)")
     p.add_argument("--box", type=float, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"),
@@ -189,6 +275,8 @@ def main():
     p.add_argument("--threshold", type=float, default=0.3, help="Score to draw a point or trust it for interpolation")
     p.add_argument("--landmarks", choices=list(LANDMARK_GROUPS), nargs="+", default=["all"],
                    help="Landmark groups to draw/export; combine with spaces (default: all)")
+    p.add_argument("--style", choices=["sapiens", "dwpose"], default="sapiens",
+                   help="Drawing: sapiens (all selected landmarks, Sapiens colours) or dwpose (OpenPose-18 body, hands, face dots, the look pose ControlNets expect)")
     p.add_argument("--inference-fps", type=float,
                    help="Infer at this rate and interpolate the frames between (default: every frame)")
     run(parse(p, "sapiens2"))

@@ -71,7 +71,7 @@ def process(model, processor, args, destination, fps):
             return record, {"overlay.jpg": overlay, "masks.png": masks}
         return record, {"overlay.mp4": overlay, "masks.mp4": masks}
 
-    frames = read_frames(args.input, args.frames, fps)
+    frames = read_frames(args.input, args.frames, fps, args.size)
     return write_run(destination, track(model, processor, frames, args), render, fps, "masks.jsonl")
 
 
@@ -87,13 +87,13 @@ def run(args):
     if args.device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
-    dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
+    dtype = torch.float32 if args.device == "cpu" else torch.float16
     model = Sam3VideoModel.from_pretrained(args.model, local_files_only=True, dtype=dtype).to(args.device).eval()
     model.score_threshold_detection = args.threshold
     model.new_det_thresh = args.new_threshold
     processor = Sam3VideoProcessor.from_pretrained(args.model, local_files_only=True)
     load_seconds = time.perf_counter() - started
-    first = list(read_frames(args.input, 1))
+    first = list(read_frames(args.input, 1, size=args.size))
     started = time.perf_counter()
     for _ in range(args.warmup):
         list(track(model, processor, first, args))

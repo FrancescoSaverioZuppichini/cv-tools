@@ -19,7 +19,7 @@ def frames_at(times):
 
 
 def run(times, fps, rate):
-    args = SimpleNamespace(input=Path("clip.mp4"), is_image=False, frames=0, inference_fps=rate, threshold=.3)
+    args = SimpleNamespace(input=Path("clip.mp4"), is_image=False, frames=0, size=None, inference_fps=rate, threshold=.3)
     with patch("cv_tools.sapiens2.temporal.read_frames", return_value=iter(frames_at(times))):
         return list(predictions(FakePose(), args, fps))
 

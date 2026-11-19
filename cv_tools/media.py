@@ -1,3 +1,4 @@
+import argparse
 import json
 import time
 from collections import deque
@@ -25,10 +26,48 @@ def get_fps(path):
     return fps if np.isfinite(fps) and fps > 0 else 30.0
 
 
-def read_frames(path, limit, fps=30.0):
+def parse_size(value):
+    """`--size`: a scale (0.5), megapixels (1mp) or WIDTHxHEIGHT (720x1280). Returns (kind, value)."""
+    text = value.strip().lower()
+    try:
+        if text.endswith("mp"):
+            kind, number = "mp", float(text[:-2])
+        elif "x" in text:
+            kind, number = "wh", tuple(int(v) for v in text.split("x"))
+        else:
+            kind, number = "scale", float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--size expects 0.5, 1mp or 720x1280, got {value!r}") from None
+    if (kind == "wh" and (len(number) != 2 or min(number) < 16)) or (kind != "wh" and not 0 < number):
+        raise argparse.ArgumentTypeError(f"--size out of range: {value!r}")
+    return kind, number
+
+
+def fit(width, height, size):
+    """Target (width, height) for a `--size` spec; aspect kept for scale and mp. Sides stay even for video encoders."""
+    if size is None:
+        return width, height
+    kind, value = size
+    if kind == "wh":
+        return value
+    scale = value if kind == "scale" else (value * 1e6 / (width * height)) ** 0.5
+    return max(2, round(width * scale / 2) * 2), max(2, round(height * scale / 2) * 2)
+
+
+def resize(image, size):
+    h, w = image.shape[:2]
+    target = fit(w, h, size)
+    if target == (w, h):
+        return image
+    # [Agent] INTER_AREA when shrinking avoids aliasing on fine texture; bicubic when enlarging.
+    shrinking = target[0] * target[1] < w * h
+    return cv2.resize(image, target, interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_CUBIC)
+
+
+def read_frames(path, limit, fps=30.0, size=None):
     if path.suffix.lower() in IMAGE_SUFFIXES:
         with Image.open(path) as image:
-            yield Frame(0, 0.0, cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR))
+            yield Frame(0, 0.0, resize(cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR), size))
         return
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -49,7 +88,7 @@ def read_frames(path, limit, fps=30.0):
             # [Agent] report missing or repeated timestamps; keep those streams monotonic at nominal FPS.
             if not np.isfinite(timestamp) or timestamp <= previous:
                 timestamp = 0.0 if index == 0 else previous + 1 / fps
-            yield Frame(index, timestamp, image)
+            yield Frame(index, timestamp, resize(image, size))
             previous = timestamp
             index += 1
     finally:

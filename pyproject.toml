@@ -4,20 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cv-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Small, local computer-vision CLIs with optimized GPU inference"
 requires-python = ">=3.12"
 dependencies = [
-  "torch>=2.11,<2.12",
-  "torchvision>=0.26,<0.27",
-  "transformers==5.20.1",
+  "torch>=2.15,<2.16",
+  "torchvision>=0.29,<0.30",
+  "transformers==5.23.0",
   "opencv-python-headless>=4.11,<5",
   "Pillow>=10",
   "numpy>=2,<3",
+  # [Agent] Meta's SAM 3 code is installed with --no-deps (its numpy<2 pin would break everything else), so its imports
+  # are listed here. timm, einops and omegaconf also cover the PNG noise networks and their checkpoint config.
+  "timm>=1.0",
+  "einops>=0.8",
+  "ftfy",
+  "iopath",
+  "pycocotools",
+  "psutil",
+  "omegaconf>=2.3",
 ]
 
 [project.optional-dependencies]
-tensorrt = ["tensorrt-cu12==10.16.1.11", "onnx==1.20.1", "onnxscript==0.7.2", "onnx_ir==1.0.0"]
+tensorrt = ["tensorrt-cu13==11.5.0.63", "onnx==1.23.2", "onnxscript==0.7.2", "onnx-ir==1.1.0"]
 
 [tool.setuptools.packages.find]
 include = ["cv_tools*"]
