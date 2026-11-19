@@ -240,8 +240,10 @@ def main():
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stride", type=int, default=2, help="SAM tracks every Nth frame, the rest filled in (default 2)")
-    p.add_argument("--pose-model", type=pose_model, default="0.4b",
-                   help="Sapiens2 pose size (0.4b | 0.8b | 1b | 5b) or a checkpoint path; its engine builds on first use (default 0.4b)")
+    # [Agent] 0.8b by default: same skeleton as 0.4b on full-body and close selfie clips, but it keeps the arms on low angles along
+    # the body where 0.4b drops them (jeans reel, 2026-11-19); a few seconds more per guide, the render time is unchanged.
+    p.add_argument("--pose-model", type=pose_model, default="0.8b",
+                   help="Sapiens2 pose size (0.4b | 0.8b | 1b | 5b) or a checkpoint path; its engine builds on first use (default 0.8b)")
     p.add_argument("--pose-res", choices=["full", "half"], default="full",  # the two pose engines that are built
                    help="Pose input: full (1024x768) or half (512x384: 3.5x faster, joints a median 4 px off)")
     p.add_argument("--mask-prompt", help="Start the track from SAM 3's mask for this text instead of the joint clicks: "
