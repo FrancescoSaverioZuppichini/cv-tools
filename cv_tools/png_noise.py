@@ -35,6 +35,8 @@ def load_model(device):
                              ("decoder", config["ae_config"]["decoder_config"])]:
         net = instantiate_from_config(net_config)
         net.load_state_dict({k.removeprefix(name + "."): v for k, v in weights.items() if k.startswith(name + ".")})
+        # [Agent] FP32 on purpose: the three networks are small (0.4 s for a 736x1312 finish on a 3090), and FP32 keeps the
+        # noise identical to the finish that was validated by eye.
         nets[name] = net.to(device).eval()
     cm, dit = config["cm_config"], config["model_config"]["params"]
     scale = np.float32(cm["sigma_data"]) / np.float32(cm["ae_raw_std"])

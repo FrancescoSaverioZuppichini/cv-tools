@@ -58,7 +58,9 @@ run-1/
 run-2/                --benchmark only
 ```
 
-GPU inference is half precision (fp16) by default in every tool. Where fp16 broke an output, the comment at that line says which part stays fp32 and why.
+GPU inference is half precision (fp16) by default in every model tool. Where fp16 broke an output, the comment at that line says which part stays fp32 and why. PNG noise runs in fp32: its networks are small (0.4 s for a 736×1312 phone finish) and fp32 keeps the noise it was validated with.
+
+Speeds in this README were measured on the previous PyTorch 2.11 / TensorRT 10 stack. Outputs on the current stack match it: pose within 0.07 px median, SAM 3.1 masks at IoU 1.0, depth within 0.2 % ([`BENCHMARK.md`](cv_tools/sapiens2/BENCHMARK.md#pytorch-215--tensorrt-11-upgrade-check)).
 
 Images give still files; videos give silent `mp4v` MP4s at the source FPS with every frame kept. Drawing and encoding run on one background thread while the GPU predicts the next frame. Timing covers decode, inference, drawing, JSONL and encoding; loading, engine builds and warmup are excluded.
 
@@ -87,7 +89,7 @@ Outputs `landmarks.jsonl` (original-space xy, heatmap-peak scores, `keypoint_ids
 
 **Sampling.** `--inference-fps` samples on decoded timestamps (fractional and variable FPS included), always infers the first and final frames, and fills the rest by linear interpolation. Interpolated points take the weaker endpoint score; low-confidence, non-finite or off-image endpoints are dropped rather than bridged. It looks ahead to the next inferred frame, so it is an offline pipeline, not live tracking. JSONL marks each frame `inferred` or `interpolated` with its `anchor_frames`.
 
-**Speed**, idle RTX 3090, 720×1280 clip, full resolution: **17.21 FPS** every frame, **26.64 FPS** at `--inference-fps 15`, **31.75 FPS** at 10. About 1.7 GiB VRAM. 15 FPS stays closer to every-frame predictions (3.48 px median vs 5.61 px at 10); keep every frame for fast hands, cuts or precision. Each refactor was checked against the recorded 10 FPS run: identical landmarks, 0.0 px. Methodology and history: [`BENCHMARK.md`](cv_tools/sapiens2/BENCHMARK.md).
+**Speed**, idle RTX 3090, 720×1280 clip, full resolution: **17.21 FPS** every frame, **26.64 FPS** at `--inference-fps 15`, **31.75 FPS** at 10. About 1.7 GiB VRAM. 15 FPS stays closer to every-frame predictions (3.48 px median vs 5.61 px at 10); keep every frame for fast hands, cuts or precision. Each refactor was checked against a recorded run: identical landmarks, then 0.07 px median across the TensorRT 11 upgrade. Methodology and history: [`BENCHMARK.md`](cv_tools/sapiens2/BENCHMARK.md).
 
 ## Sapiens2 · body-part contours
 
@@ -377,8 +379,8 @@ SAM 3.1 (`sam31`, `motion_guide`) and PNG (`png_noise`, `phone_finish`) weights:
 # (Or the gated facebook/sam3.1 download, sam3.1_multiplex.pt.)
 .venv/bin/python -c "import torch; from safetensors.torch import load_file; torch.save({'model': load_file('<ComfyUI>/models/checkpoints/sam3.1_multiplex_fp16.safetensors')}, '.models/sam3.1/sam3.1_multiplex.pt')"
 # PNG: the generator checkpoint, and the SIDD validation pairs its noise references come from
-uvx gdown 1Ry46H1BjgKGPLKCNMj89VtmS9ouRHWUS -O .models/png-cvpr2026/prompt-cm.ckpt
-uvx gdown 18qzVfQlEM9fP8wOb9GH28ZEgC8dBT7-N -O sidd-val.tar
+.venv/bin/uvx gdown 1Ry46H1BjgKGPLKCNMj89VtmS9ouRHWUS -O .models/png-cvpr2026/prompt-cm.ckpt
+.venv/bin/uvx gdown 18qzVfQlEM9fP8wOb9GH28ZEgC8dBT7-N -O sidd-val.tar
 mkdir -p .models/png-cvpr2026/sidd-val && tar -xf sidd-val.tar -C .models/png-cvpr2026/sidd-val && rm sidd-val.tar
 ```
 
