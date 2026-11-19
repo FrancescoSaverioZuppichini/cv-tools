@@ -2,6 +2,8 @@
 
 RTX 3090 24 GB, PyTorch 2.11.0+cu128, Transformers 5.20.1, TensorRT 10.16.1.11. FP16 with FP32 normalization constraints, batch 1 unless specified. Four PyTorch CPU threads; one OpenCV thread.
 
+The tables below were measured on that stack. Since 2026-11-19 the tools run PyTorch 2.15.0+cu132, Transformers 5.23.0 and TensorRT 11.5.0.63 with strongly typed engines; see [the upgrade check](#pytorch-215--tensorrt-11-upgrade-check) at the end.
+
 ## Current pipeline · verified idle-GPU results
 
 Full **1024×768** model input, all 308 landmarks, entire `seedance-shopping-reference-6s.mp4`: **180 frames, 720×1280, 30 FPS**. Five warmup passes, then **two complete measured runs per configuration**. Same cached engine and bounded CPU output worker throughout. No competing GPU compute processes were detected during any of the three invocations; monitoring records are saved with each result.
@@ -110,3 +112,15 @@ Raw CPU replay summaries and videos are saved in `runs/cpu-replay-10/` and `runs
 - [TensorRT 11 BF16 transposed-convolution fixes and parity checks](https://github.com/rerun-io/examples-monorepo/pull/106).
 
 Their measurements are not substituted for measurements on this workstation. This project uses its own HF-to-ONNX-to-TensorRT code.
+
+## PyTorch 2.15 · TensorRT 11 upgrade check
+
+TensorRT 11 has no weakly typed builds, so the per-layer FP32 pinning above is gone. The engine is strongly typed on the FP16 ONNX export: every tensor keeps its exported dtype, so the places where HF upcasts (RMSNorm, the attention softmax) stay FP32 by construction. Checked against the TensorRT 10 guarded engine, same inputs, 2026-11-19:
+
+| Input | Median | p99 | Note |
+|---|---|---|---|
+| 1 frame, 736×1312, full resolution | **0.064 px** | 0.51 px | all 308 points |
+| 60 video frames, same clip | **0.067 px** | 4.35 px | raw max is DARK extrapolation on invisible points, as above |
+| `motion_guide --mask-prompt person`, 60 frames | 0.056 px | — | mask IoU 0.9998, same prompt frame |
+
+The median is a third of the old engine's distance to PyTorch (0.187 px), so the two engines agree more closely than either agrees with PyTorch. The engine build, ONNX export included, took 95 s. No new speed numbers: another job was on the GPU during the check.
