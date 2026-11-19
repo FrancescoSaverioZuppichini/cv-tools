@@ -55,18 +55,15 @@ def predict_person(pose, image, box=None):
 
 
 def find_prompt(pose, frames, candidates, threshold):  # frames: BGR uint8 [frames, H, W, 3] on the GPU
-    """(frame index, her body joints as SAM clicks) on the candidate frame where she is clearest."""
-    best_score, best = 0.0, None
+    """(frame index, her body joints as SAM clicks) on the first candidate frame where a person appears."""
+    # [Agent] The first frame with a person, not the "clearest" one: ranking by joints x body area picked frame 84 of a
+    # selfie that opens on her face, and SAM lost her tracking back through the camera swing (frames 0-34 unmasked).
     for index in candidates:
         points, scores = predict_person(pose, frames[index])
         visible = points[[i for i in pose.openpose_body if scores[i] >= threshold and np.isfinite(points[i]).all()]]
-        # [Agent] More visible joints and a bigger body both make a better prompt; their product ranks the frames.
-        score = len(visible) * float(np.ptp(visible[:, 0]) * np.ptp(visible[:, 1])) if len(visible) >= 4 else 0.0
-        if score > best_score:
-            best_score, best = score, (index, [tuple(map(float, p)) for p in visible])
-    if best is None:
-        raise ValueError("No person found in the clip")
-    return best
+        if len(visible) >= 4:
+            return index, [tuple(map(float, p)) for p in visible]
+    raise ValueError("No person found in the clip")
 
 
 def text_mask(frame, clicks, prompt):
@@ -211,6 +208,11 @@ def run(args):
         seed = timed("mask_prompt", lambda: text_mask(frames[prompt_frame], clicks, args.mask_prompt)) if args.mask_prompt else None
         tracker = timed("load_tracker", load_tracker)
         masks, _ = timed("track", lambda: track(tracker, frames, prompt_frame, points=clicks, mask=seed, stride=args.stride))
+        # [Agent] An empty mask means no blur and no pose on that frame; the guide would show the source person. Stop instead.
+        empty = (masks.flatten(1).sum(1) == 0).nonzero().flatten().tolist()
+        if empty:
+            raise SystemExit(f"SAM lost the person on {len(empty)} frames ({empty[0]}-{empty[-1]}); "
+                             f"started on frame {prompt_frame}. Pass --prompt-frame with a frame where the person is visible.")
         tracker = None  # frees SAM's ~4 GB before pose and drawing
         torch.cuda.empty_cache()
         args.out.mkdir(parents=True, exist_ok=True)
@@ -249,8 +251,8 @@ def main():
     p.add_argument("--blur-div", type=float, default=15, help="Blur sigma = longest side / this (default 15: heavy)")
     p.add_argument("--face", choices=["brows_mouth", "all", "none"], default="brows_mouth",
                    help="Face dots: eyebrows + mouth at DWPose density (default), all Sapiens face dots, or none")
-    p.add_argument("--prompt-every", type=int, default=6, help="Frames between pose checks for the SAM prompt frame")
-    p.add_argument("--prompt-frame", type=int, help="Prompt SAM on this frame instead of searching (her joints there)")
+    p.add_argument("--prompt-every", type=int, default=6, help="Frames between pose checks while looking for the first frame with a person")
+    p.add_argument("--prompt-frame", type=int, help="Start SAM on this frame instead of the first frame with a person")
     p.add_argument("--threshold", type=float, default=0.3, help="Keypoint score to trust and draw (default 0.3)")
     run(parse(p, "motion_guide"))
 
