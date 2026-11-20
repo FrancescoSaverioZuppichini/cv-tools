@@ -247,7 +247,7 @@ def main():
     p.add_argument("--pose-res", choices=["full", "half"], default="full",  # the two pose engines that are built
                    help="Pose input: full (1024x768) or half (512x384: 3.5x faster, joints a median 4 px off)")
     p.add_argument("--mask-prompt", help="Start the track from SAM 3's mask for this text instead of the joint clicks: "
-                                         "'person' keeps her clothes in; 'face, hair' for a char-only swap")
+                                         "'person' keeps her clothes in; 'head, hair' for a face-only swap (her body and clothes stay visible)")
     # [Agent] A wider blur hides what sticks out of the tracked mask (flyaway hair, a bun's outline, dangling straps) that H3 would otherwise rebuild.
     p.add_argument("--mask-grow", type=float, default=0.01, help="Blur area grown beyond the mask, as a fraction of the long side in total (default 0.01)")
     p.add_argument("--blur-div", type=float, default=15, help="Blur sigma = longest side / this (default 15: heavy)")

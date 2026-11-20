@@ -208,7 +208,7 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
 
 1. **Decode once.** Every later step reads the same frames.
 2. **Prompt.** Sapiens2 pose (TensorRT FP16) checks every 6th frame. The frame with the most visible joints on the biggest body becomes the prompt frame, and her joints there become the SAM clicks. It does not assume she is in frame 1.
-3. **Track.** SAM 3.1 runs from that frame, both directions, stride 2. With `--mask-prompt`, SAM 3's text mask on the prompt frame seeds the track instead of the clicks: the instances her joints fall inside, unioned (a part prompt like `face, hair` returns one instance per part). The SAM 3 detector comes from the SAM 3.1 checkpoint, so no gated download; it is freed before SAM 3.1 loads.
+3. **Track.** SAM 3.1 runs from that frame, both directions, stride 2. With `--mask-prompt`, SAM 3's text mask on the prompt frame seeds the track instead of the clicks: the instances her joints fall inside, unioned (a part prompt like `head, hair` returns one instance per part). The SAM 3 detector comes from the SAM 3.1 checkpoint, so no gated download; it is freed before SAM 3.1 loads.
 4. **Pose, blur and draw on every frame.**
    - Pose runs inside her mask's box, so other people never get her skeleton.
    - The neck is the shoulders' midpoint, as in DWPose.
@@ -223,7 +223,7 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
 | `--stride N` | SAM stride (default 2) |
 | `--pose-model 0.4b\|0.8b\|1b\|5b\|PATH` | Sapiens2 pose checkpoint, as in `sapiens2.pose --model`; default `0.8b` (keeps arms on low selfie angles where 0.4b drops them) |
 | `--pose-res full\|half` | Pose model input. `full` (1024×768) is the default. `half` (512×384) makes pose 3.5× faster, but joints land a median 4 px and up to ~11 px from full, mostly fast hands |
-| `--mask-prompt TEXT` | Seed the track from SAM 3's mask for this text instead of the joint clicks; comma-separated phrases are pooled. `person` keeps her clothes in; `face, hair` for a character-only swap |
+| `--mask-prompt TEXT` | Seed the track from SAM 3's mask for this text instead of the joint clicks; comma-separated phrases are pooled. `person` keeps her clothes in; `head, hair` for a face-only swap (her body and clothes stay visible) |
 | `--mask-grow 0.01` | Blur area grown beyond the mask, as a fraction of the long side; wider hides what sticks out of the mask (flyaway hair, straps) |
 | `--blur-div 15` | Blur sigma = longest side / this; 15 is run 28's heavy blur |
 | `--face brows_mouth\|all\|none` | Face dots (default eyebrows + mouth) |
