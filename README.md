@@ -10,6 +10,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.sam3` | [Meta SAM 3](https://huggingface.co/facebook/sam3) | text-prompted instance masks, tracked across video frames |
 | `python -m cv_tools.sam31` | [Meta SAM 3.1](https://github.com/facebookresearch/sam3) tracker | one object tracked both ways from clicks or a mask; fastest SAM path on the 3090 |
 | `python -m cv_tools.motion_guide` | Sapiens2 pose + SAM 3.1 | the H3 `<Video 1>` guide from a clip: the performer blurred inside her mask, her pose drawn on top |
+| `python -m cv_tools.char_sheet` | Sapiens2 pose | a three-column character sheet cut into front body, back body and head, at full resolution |
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
 | `python -m cv_tools.canny` | OpenCV Canny, auto thresholds | edge map (white on black), image or video |
 | `python -m cv_tools.png_noise` | [PNG](https://github.com/JK-the-Ko/PNG) (CVPR 2026) noise generator | real iPhone 7 sensor noise on images, five finishing looks |
@@ -31,6 +32,7 @@ python -m cv_tools.palette --input photo.jpg
 python -m cv_tools.canny --input photo.jpg
 python -m cv_tools.sam31 --input clip.mp4 --frame 141 --points 199,40 203,525
 python -m cv_tools.motion_guide --input clip.mp4
+python -m cv_tools.char_sheet --input sheet.png
 python -m cv_tools.phone_finish --input renders/
 ```
 
@@ -207,7 +209,7 @@ Video and CUDA only; `--benchmark` is refused (`summary.json` already times ever
 Use it to prepare a source clip for an H3 character swap. The performer is hidden under a heavy blur (so H3 cannot copy her identity or clothes), and her motion is drawn on top: the OpenPose-style body and hand skeleton, plus white dots on the eyebrows and mouth for expression. It is the recipe of the H3 swap that worked (run 28), in one process with no ComfyUI.
 
 1. **Decode once.** Every later step reads the same frames.
-2. **Prompt.** Sapiens2 pose (TensorRT FP16) checks every 6th frame. The frame with the most visible joints on the biggest body becomes the prompt frame, and her joints there become the SAM clicks. It does not assume she is in frame 1.
+2. **Prompt.** Sapiens2 pose (TensorRT FP16) checks every 6th frame from the start; the first frame with a person becomes the prompt frame (or `--prompt-frame N`), and her joints there become the SAM clicks. If SAM loses her on any frame, the run stops and names the frames, so no frame goes out unblurred.
 3. **Track.** SAM 3.1 runs from that frame, both directions, stride 2. With `--mask-prompt`, SAM 3's text mask on the prompt frame seeds the track instead of the clicks: the instances her joints fall inside, unioned (a part prompt like `head, hair` returns one instance per part). The SAM 3 detector comes from the SAM 3.1 checkpoint, so no gated download; it is freed before SAM 3.1 loads.
 4. **Pose, blur and draw on every frame.**
    - Pose runs inside her mask's box, so other people never get her skeleton.
@@ -251,6 +253,34 @@ Where the old pipeline lost its time:
 **Known gaps:**
 - No re-prompting yet. The old tracker re-prompted failing stretches; this costs the bridge's first entrance frame.
 - Peak VRAM is higher: SAM's 8-frame encoder batch plus PyTorch's cache, with the pose engine loaded.
+
+## Character sheet · cut a three-column sheet into its parts
+
+```bash
+python -m cv_tools.char_sheet --input sheet.png
+python -m cv_tools.char_sheet --input sheet.png --output runs/char_sheet/s1004 --grow 1.2 --floor 0.05
+```
+
+Image and CUDA only. The input is a character reference sheet with three columns split by thin white gaps: the full body from the front, the full body from the back, and a column whose top half is a face close-up (the bottom half is ignored). It only crops: nothing is redrawn and every crop keeps the input's full resolution, so upscale the sheet first if you want bigger crops.
+
+1. **Columns.** The gaps are the columns that stay whiter than the studio background from top to bottom. The face panel's divider is often too faint to find; the third column is then split in half.
+2. **Bodies.** Sapiens2 pose on each body column. Both bodies get the same two cuts, so front and back keep the same scale: just under the chin (`--below-chin` of the chin-to-shoulders distance: the head goes, the neck and shoulders stay) and just under the lowest foot point (`--floor` of the body height). The run stops if the top cut would clip the back view's shoulders.
+3. **Head.** Sapiens2's face landmarks frame the box: from `--hair` of the brows-to-chin span above the brows to `--under-chin` below the chin, `--aspect` wide, grown by `--grow` around its centre. It is centred between the eyes and kept symmetric inside the panel, so the face is always in the middle.
+
+| Flag | Meaning |
+|---|---|
+| `--pose-model 0.8b` | Sapiens2 pose size (`0.4b`, `0.8b`, `1b`, `5b`) or a checkpoint path |
+| `--score 0.3` | Keypoint confidence to trust |
+| `--below-chin 0.1` | Body top cut under the chin, as a share of chin-to-shoulders |
+| `--floor 0.03` | Floor kept under the lowest foot point, as a share of the body height |
+| `--hair 0.75` | Head top above the brows, as a share of brows-to-chin |
+| `--under-chin 0.12` | Head bottom under the chin, as a share of brows-to-chin |
+| `--aspect 0.8` | Head width over height |
+| `--grow 1.12` | Head box scale around its centre (1 = the tight box) |
+
+Of the shared flags, `--input`, `--output` and `--device` apply.
+
+Outputs `front.png`, `back.png` and `head.png` at full resolution, `proof.jpg` (the sheet with every pose point and cut drawn) and `summary.json` (the columns, chin, shoulders, lowest foot point, the cut rows, the head box, how far the face sits from its centre, and the settings).
 
 ## Palette · colours and light
 
