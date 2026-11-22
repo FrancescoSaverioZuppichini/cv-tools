@@ -56,7 +56,7 @@ def main():
     p.add_argument("--min-shot", type=int, default=MIN_SHOT, help=f"Shortest shot in frames (default {MIN_SHOT})")
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
-    num, den = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(a.input)]).strip().split("/")
+    num, den = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "default=nw=1:nk=1", str(a.input)]).strip().split("/")
     fps = float(num) / float(den)
     score = scene_scores(a.input)
     starts = shot_starts(score, a.cut, a.min_shot)
