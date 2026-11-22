@@ -133,10 +133,13 @@ def compose(frame, mask, drawing, blur_div, mask_grow=0.01):
 
 
 @contextlib.contextmanager
-def h264_writer(path, w, h, fps):
+def h264_writer(path, w, h, fps, audio=None):
     """Yields write(frame_bgr uint8 [h, w, 3]); libx264 CRF 14, yuv420p, padded to even sides as x264 requires."""
+    # [Agent] The guide carries the source clip's sound (when it has any), so a workflow loads one file for picture and audio.
+    # "1:a?" skips a silent source; -shortest trims the audio to the frames actually written.
+    sound = ["-i", str(audio), "-map", "0:v", "-map", "1:a?", "-c:a", "aac", "-shortest"] if audio else []
     ffmpeg = subprocess.Popen(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
-                               "-r", str(fps), "-i", "-", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264",
+                               "-r", str(fps), "-i", "-", *sound, "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264",
                                "-crf", "14", "-pix_fmt", "yuv420p", str(path)], stdin=subprocess.PIPE)
     try:
         yield ffmpeg.stdin.write
@@ -147,7 +150,7 @@ def h264_writer(path, w, h, fps):
             raise RuntimeError(f"ffmpeg failed writing {path}")
 
 
-def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01):
+def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01, audio=None):
     """Pose each frame inside her mask's box, then draw, blur and encode it. frames (BGR uint8) and masks live on the GPU;
     returns (points, scores) per frame."""
     total, h, w = frames.shape[:3]
@@ -167,7 +170,7 @@ def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01
 
     # [Agent] One worker draws, composes and encodes frame i while the GPU runs frame i+1's pose. Waiting for the previous
     # [Agent] frame before queueing the next keeps one frame in flight and raises a failure on the frame that caused it.
-    with h264_writer(path, w, h, fps) as write, ThreadPoolExecutor(max_workers=1) as worker:
+    with h264_writer(path, w, h, fps, audio) as write, ThreadPoolExecutor(max_workers=1) as worker:
         pending = None
         for index in range(total):
             if has_person[index]:
@@ -217,7 +220,7 @@ def run(args):
         torch.cuda.empty_cache()
         args.out.mkdir(parents=True, exist_ok=True)
         points, scores = timed("pose_draw_encode", lambda: write_guide(
-            args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow))
+            args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input))
     timed("save", lambda: (np.savez_compressed(args.out / "masks.npz", masks=masks.cpu().numpy()),
                            np.savez_compressed(args.out / "keypoints.npz", points=points, scores=scores,
                                                names=np.array(pose.names))))
