@@ -4,7 +4,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 
 | Run | What | Output |
 |---|---|---|
-| `python -m cv_tools.sapiens2.pose` | [Meta Sapiens2 0.4B](https://github.com/facebookresearch/sapiens2) pose | 308 landmarks, skeleton overlay (Sapiens or DWPose look) |
+| `python -m cv_tools.sapiens2.pose` | [Meta Sapiens2 0.8B](https://github.com/facebookresearch/sapiens2) pose | 308 landmarks, skeleton overlay (Sapiens or DWPose look) |
 | `python -m cv_tools.sapiens2.contour` | [Meta Sapiens2 0.4B](https://huggingface.co/facebook/sapiens2-seg-0.4b) body-part segmentation | per-part outlines on black, label maps |
 | `python -m cv_tools.depth_anything` | [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2) small/base/large | relative depth map |
 | `python -m cv_tools.sam3` | [Meta SAM 3](https://huggingface.co/facebook/sam3) | text-prompted instance masks, tracked across video frames |
@@ -19,6 +19,58 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.social` | phone ISP, Instagram, WhatsApp compression | what a photo looks like after it has been posted and re-sent |
 
 Every file takes `--help`.
+
+## Install
+
+Linux needs an NVIDIA driver for CUDA 13.2; macOS runs on MPS. Python 3.12+.
+
+```bash
+git clone https://github.com/FrancescoSaverioZuppichini/cv-tools && cd cv-tools
+bash setup.sh                 # one .venv for every tool, plus the SAM 3 and PNG code in third_party/
+source .venv/bin/activate
+```
+
+No `python3 -m venv` on the machine (Ubuntu without `python3-venv`)? Give setup another Python 3.12: `PYTHON=$(uv python find 3.12) bash setup.sh`. `VENV=/path` puts the environment elsewhere.
+
+One environment runs every tool: PyTorch 2.15 (CUDA 13.2 wheels), Transformers 5.23 and, on Linux, TensorRT 11.5. Meta's [SAM 3](https://github.com/facebookresearch/sam3) installs without its pins (it pins `numpy<2`, which would break the other tools); [PNG](https://github.com/JK-the-Ko/PNG) has no package and is imported from its folder.
+
+### Download the weights
+
+Nothing downloads by itself: every tool loads its checkpoint offline from `.models/`. Download what your tools need, from the cv-tools folder with the venv active (it has `hf` and `uvx`). `CV_TOOLS_DATA=/path` moves `.models/` and `engines/` elsewhere (e.g. a data drive); then download into `$CV_TOOLS_DATA/.models/...`.
+
+| Tool | Weights |
+|---|---|
+| `motion_guide` | Sapiens2 pose 0.8b + SAM 3.1 |
+| `char_sheet`, `sapiens2.pose` | Sapiens2 pose 0.8b |
+| `sam31` | SAM 3.1 |
+| `png_noise`, `phone_finish` | PNG |
+| `sapiens2.contour` | Sapiens2 seg |
+| `depth_anything` | Depth Anything V2 large |
+| `sam3` | SAM 3 (gated) |
+| `shots`, `palette`, `canny`, `social` | nothing |
+
+```bash
+# Sapiens2 pose 0.8b (3.4 GB). The repo's sapiens2_0.8b_pose.safetensors is the same weights again: skip it.
+hf download facebook/sapiens2-pose-0.8b config.json preprocessor_config.json model.safetensors --local-dir .models/sapiens2-pose-0.8b
+
+# SAM 3.1 (1.7 GB): ComfyUI's sam3.1_multiplex_fp16.safetensors holds the same tensors under Meta's names; re-save it in Meta's layout.
+# (Or the gated facebook/sam3.1 download: sam3.1_multiplex.pt into .models/sam3.1/.)
+mkdir -p .models/sam3.1
+python -c "import torch; from safetensors.torch import load_file; torch.save({'model': load_file('<ComfyUI>/models/checkpoints/sam3.1_multiplex_fp16.safetensors')}, '.models/sam3.1/sam3.1_multiplex.pt')"
+
+# PNG: the generator checkpoint, and the SIDD validation pairs its noise references come from
+mkdir -p .models/png-cvpr2026/sidd-val
+uvx gdown 1Ry46H1BjgKGPLKCNMj89VtmS9ouRHWUS -O .models/png-cvpr2026/prompt-cm.ckpt
+uvx gdown 18qzVfQlEM9fP8wOb9GH28ZEgC8dBT7-N -O sidd-val.tar && tar -xf sidd-val.tar -C .models/png-cvpr2026/sidd-val && rm sidd-val.tar
+
+# Only for the tools that need them:
+hf download facebook/sapiens2-seg-0.4b --local-dir .models/sapiens2-seg-0.4b                       # sapiens2.contour
+hf download depth-anything/Depth-Anything-V2-Large-hf --local-dir .models/depth-anything-v2-large  # depth_anything (--model small|base: the -Small-hf / -Base-hf repos)
+# sam3 is gated: accept the license at huggingface.co/facebook/sam3 and run `hf auth login`. sam3.pt duplicates model.safetensors.
+hf download facebook/sam3 --local-dir .models/sam3 --exclude sam3.pt
+```
+
+The first CUDA run of a Sapiens2 size builds its TensorRT engine into `engines/` (a couple of minutes, once per GPU).
 
 ## Quick start
 
@@ -84,7 +136,7 @@ python -m cv_tools.sapiens2.pose --input clip.mp4 --style dwpose      # OpenPose
 | `--style sapiens\|dwpose` | Drawing. `sapiens` (default): the selected landmarks in Sapiens colours. `dwpose`: the OpenPose-18 body with its fixed per-limb colours, 21-point rainbow hands and white face dots (brows, eyes, nose, lips; Sapiens2 has no jaw line), the picture pose ControlNets are trained on |
 | `--threshold 0.3` | Score to draw a point and to trust it as an interpolation endpoint |
 | `--inference-fps N` | Infer at N FPS, linearly interpolate the frames between |
-| `--model 0.4b\|0.8b\|1b\|5b\|PATH` | Checkpoint size, read from `.models/sapiens2-pose-<size>`, or a local checkpoint; default `0.4b`. A size's TensorRT engine builds on first use (a couple of minutes) |
+| `--model 0.4b\|0.8b\|1b\|5b\|PATH` | Checkpoint size, read from `.models/sapiens2-pose-<size>`, or a local checkpoint; default `0.8b`. A size's TensorRT engine builds on first use (a couple of minutes) |
 
 Outputs `landmarks.jsonl` (original-space xy, heatmap-peak scores, `keypoint_ids`, `null` for invalid points), `overlay.(jpg|mp4)` (pose on the source) and `guide.(png|mp4)` (skeleton on black).
 
@@ -376,44 +428,6 @@ python -m cv_tools.social --input finished.jpg --no-phone      # already carries
 ```
 
 Three JPEGs per image in `<output>/<grandparent>/<parent>/` (default output `runs/social/<timestamp>/`): `-phone.jpg` the phone's own processing (chroma denoise, strong ISP sharpening, JPEG 90), `-ig.jpg` Instagram (1080 px wide, box downscale, JPEG 78) and `-wa.jpg` a WhatsApp re-send of that (JPEG 70), all 4:2:0 like the real thing. `--no-phone` skips the phone stage for images that already carry real phone noise (`png_noise`, `phone_finish`): denoising and sharpening them again would erase it. CPU only.
-
-## Installation
-
-Linux: an NVIDIA driver supporting CUDA 13.2. macOS: MPS-capable hardware. Python 3.12+.
-
-```bash
-bash setup.sh             # PYTHON=/path/to/python3.12 picks the interpreter, VENV=/path puts the environment elsewhere
-source .venv/bin/activate
-```
-
-One environment runs every tool: PyTorch 2.15 (CUDA 13.2 wheels), Transformers 5.23 and, on Linux, TensorRT 11.5. `setup.sh` also clones two research repos into `third_party/`: Meta's [SAM 3](https://github.com/facebookresearch/sam3), installed without its pins (it pins `numpy<2`, which would break the other tools), and [PNG](https://github.com/JK-the-Ko/PNG), imported from its folder.
-
-Checkpoints live in `.models/` and load offline; nothing downloads at run time. `CV_TOOLS_DATA=/path` moves `.models/` and `engines/` to that folder (e.g. a data drive); the download commands below then take `$CV_TOOLS_DATA/.models/...`.
-
-```bash
-hf download facebook/sapiens2-pose-0.4b --local-dir .models/sapiens2-pose-0.4b
-hf download facebook/sapiens2-pose-0.8b --local-dir .models/sapiens2-pose-0.8b   # optional: --model / --pose-model 0.8b
-hf download facebook/sapiens2-seg-0.4b --local-dir .models/sapiens2-seg-0.4b     # sapiens2.contour
-hf download depth-anything/Depth-Anything-V2-Small-hf --local-dir .models/depth-anything-v2-small
-hf download depth-anything/Depth-Anything-V2-Base-hf --local-dir .models/depth-anything-v2-base
-hf download depth-anything/Depth-Anything-V2-Large-hf --local-dir .models/depth-anything-v2-large
-# SAM 3 is gated: accept the license at huggingface.co/facebook/sam3, run `hf auth login`, then
-hf download facebook/sam3 --local-dir .models/sam3 --exclude sam3.pt
-```
-
-`sam3.pt` is the 3.4 GB original-format duplicate of `model.safetensors`; the tool does not need it.
-
-SAM 3.1 (`sam31`, `motion_guide`) and PNG (`png_noise`, `phone_finish`) weights:
-
-```bash
-# SAM 3.1: ComfyUI's sam3.1_multiplex_fp16.safetensors holds the same tensors under Meta's names; re-save it in Meta's layout.
-# (Or the gated facebook/sam3.1 download, sam3.1_multiplex.pt.)
-.venv/bin/python -c "import torch; from safetensors.torch import load_file; torch.save({'model': load_file('<ComfyUI>/models/checkpoints/sam3.1_multiplex_fp16.safetensors')}, '.models/sam3.1/sam3.1_multiplex.pt')"
-# PNG: the generator checkpoint, and the SIDD validation pairs its noise references come from
-.venv/bin/uvx gdown 1Ry46H1BjgKGPLKCNMj89VtmS9ouRHWUS -O .models/png-cvpr2026/prompt-cm.ckpt
-.venv/bin/uvx gdown 18qzVfQlEM9fP8wOb9GH28ZEgC8dBT7-N -O sidd-val.tar
-mkdir -p .models/png-cvpr2026/sidd-val && tar -xf sidd-val.tar -C .models/png-cvpr2026/sidd-val && rm sidd-val.tar
-```
 
 ## Layout
 

@@ -266,8 +266,8 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", type=pose_model, default="0.4b",
-                   help="Checkpoint size (0.4b | 0.8b | 1b | 5b, from .models/sapiens2-pose-<size>) or a path (default: 0.4b)")
+    p.add_argument("--model", type=pose_model, default="0.8b",
+                   help="Checkpoint size (0.4b | 0.8b | 1b | 5b, from .models/sapiens2-pose-<size>) or a path (default: 0.8b)")
     p.add_argument("--resolution", type=resolution, default=(1024, 768),
                    help="Model input: full | half | quarter | HxW (default: full, 1024x768)")
     p.add_argument("--box", type=float, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"),
