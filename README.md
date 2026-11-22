@@ -10,6 +10,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.sam3` | [Meta SAM 3](https://huggingface.co/facebook/sam3) | text-prompted instance masks, tracked across video frames |
 | `python -m cv_tools.sam31` | [Meta SAM 3.1](https://github.com/facebookresearch/sam3) tracker | one object tracked both ways from clicks or a mask; fastest SAM path on the 3090 |
 | `python -m cv_tools.motion_guide` | Sapiens2 pose + SAM 3.1 | the H3 `<Video 1>` guide from a clip: the performer blurred inside her mask, her pose drawn on top |
+| `python -m cv_tools.shots` | ffmpeg scene score | the hard cuts in a clip: `shots.json` (shot start/end frame and `MM:SS.mmm`) and one frame strip per shot, for writing one-shot or multi-shot prompts |
 | `python -m cv_tools.char_sheet` | Sapiens2 pose | a three-column character sheet cut into front body, back body and head, at full resolution |
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
 | `python -m cv_tools.canny` | OpenCV Canny, auto thresholds | edge map (white on black), image or video |
