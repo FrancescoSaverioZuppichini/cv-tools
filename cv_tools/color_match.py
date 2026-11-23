@@ -56,6 +56,7 @@ def main():
     p.add_argument("--step", type=float, default=0.25, help="Seconds between samples (default 0.25)")
     p.add_argument("--width", type=int, default=320, help="Sample width in pixels (default 320)")
     p.add_argument("--grow", type=int, default=18, help="Pixels the person mask grows at sample width (default 18)")
+    p.add_argument("--strength", type=float, default=1.0, help="1 = full match, 0.5 = every curve point halfway back to no change (default 1)")
     args = p.parse_args()
 
     height, width = cv2.VideoCapture(str(args.source)).read()[1].shape[:2]
@@ -78,9 +79,12 @@ def main():
     channels, shifts = [], []
     for name, c in (("r", 2), ("g", 1), ("b", 0)):
         xs, ys = fit(source_px[:, c], render_px[:, c])
+        # [Agent] How far the full fit strays from no change, in 0-255 levels: the number that says whether matching is worth it.
+        # [Agent] It is measured before --strength, so the same clip always reads the same number.
+        shift = np.abs(ys - xs).max() * 255
+        ys = xs + args.strength * (ys - xs)
         channels.append(f"{name}='" + " ".join(f"{x:.4f}/{y:.4f}" for x, y in zip(xs, ys)) + "'")
-        # [Agent] How far the curve strays from no change, in 0-255 levels: the number that says whether matching is worth it.
-        shifts.append(f"{name} {np.abs(ys - xs).max() * 255:.0f}")
+        shifts.append(f"{name} {shift:.0f}")
     print(f"color_match: {len(times)} samples, {len(source_px)} px, largest shift {', '.join(shifts)} levels", file=sys.stderr)
     print("curves=" + ":".join(channels))
 

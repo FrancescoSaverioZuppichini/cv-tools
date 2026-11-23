@@ -453,6 +453,7 @@ ffmpeg -i swap.mp4 -vf "$(python -m cv_tools.color_match ... )" -c:a copy matche
 | `--step 0.25` | Seconds between samples |
 | `--width 320` | Sample width; height follows the source |
 | `--grow 18` | Pixels the person mask grows at sample width, so the new person's hair and arms stay out |
+| `--strength 1` | `0.5` moves every curve point halfway back to no change: when the render's background is already close, half keeps the person natural. Render both and pick by eye |
 
 For each of R, G and B, the render's brightness levels at 17 even quantiles are mapped to the source's on the background pixels (person mask grown, letterbox bars and clipped highlights skipped), and read back as a 17-point curve that never goes down. One global curve per channel: a whole-frame tint or grade matches; local light and saturation changes that mix channels do not. **Largest shift** is how far each curve strays from no change, in 0–255 levels: 12–17 on a render whose colour was fine (Coffee time), 36–38 on one that lost the source's green grade (crashing).
 
