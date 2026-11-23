@@ -15,6 +15,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
 | `python -m cv_tools.canny` | OpenCV Canny, auto thresholds | edge map (white on black), image or video |
 | `python -m cv_tools.png_noise` | [PNG](https://github.com/JK-the-Ko/PNG) (CVPR 2026) noise generator | real iPhone 7 sensor noise on images, five finishing looks |
+| `python -m cv_tools.color_match` | quantile curves on background pixels | an ffmpeg `curves` filter that gives a render its source clip's colour grade |
 | `python -m cv_tools.phone_finish` | sharpen + PNG grain + JPEG | renders that read like phone photos |
 | `python -m cv_tools.social` | phone ISP, Instagram, WhatsApp compression | what a photo looks like after it has been posted and re-sent |
 
@@ -435,6 +436,28 @@ python -m cv_tools.social --input finished.jpg --no-phone      # already carries
 
 Three JPEGs per image in `<output>/<grandparent>/<parent>/` (default output `runs/social/<timestamp>/`): `-phone.jpg` the phone's own processing (chroma denoise, strong ISP sharpening, JPEG 90), `-ig.jpg` Instagram (1080 px wide, box downscale, JPEG 78) and `-wa.jpg` a WhatsApp re-send of that (JPEG 70), all 4:2:0 like the real thing. `--no-phone` skips the phone stage for images that already carry real phone noise (`png_noise`, `phone_finish`): denoising and sharpening them again would erase it. CPU only.
 
+## Colour match · give a render its source's grade
+
+```bash
+python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --end 7.3
+# stderr: color_match: 29 samples, 783032 px, largest shift r 9, g 14, b 37 levels
+# stdout: curves=r='0.0000/0.0000 0.0625/...':g='...':b='...'
+ffmpeg -i swap.mp4 -vf "$(python -m cv_tools.color_match ... )" -c:a copy matched.mp4
+```
+
+| Flag | Meaning |
+|---|---|
+| `--source`, `--render` | The clip and the render made from it, on the same clock (the render may have another size or frame rate) |
+| `--masks` | motion_guide's `masks.npz` for the source: the person is left out of the fit; without it every pixel counts |
+| `--start 0`, `--end` | Seconds sampled; leave out dissolves and fades |
+| `--step 0.25` | Seconds between samples |
+| `--width 320` | Sample width; height follows the source |
+| `--grow 18` | Pixels the person mask grows at sample width, so the new person's hair and arms stay out |
+
+For each of R, G and B, the render's brightness levels at 17 even quantiles are mapped to the source's on the background pixels (person mask grown, letterbox bars and clipped highlights skipped), and read back as a 17-point curve that never goes down. One global curve per channel: a whole-frame tint or grade matches; local light and saturation changes that mix channels do not. **Largest shift** is how far each curve strays from no change, in 0–255 levels: 12–17 on a render whose colour was fine (Coffee time), 36–38 on one that lost the source's green grade (crashing).
+
+**Speed**, 4090 box, 8 s 960×720 clip + 1120×864 render, 29 samples: **0.65 s** including Python start-up (the first version seeked with one ffmpeg call per sample: 6.1 s, same curves within the fit's own noise). CPU only.
+
 ## Layout
 
 ```text
@@ -447,6 +470,7 @@ cv_tools/
   sam31.py            SAM 3.1 tracker: load_tracker(), read_video(), track() for other tools; its CLI is run()/main()
   motion_guide.py     Sapiens2 pose + SAM 3.1 + blur + drawing in one pass: the H3 <Video 1> guide
   palette.py          Lab k-means palette, highlight/shadow tint
+  color_match.py      Background-only quantile curves from a render to its source, as an ffmpeg curves filter
   canny.py            Auto-threshold Canny edges
   png_noise.py        PNG's networks without Lightning: tiled one-step noise sampling, finishing looks
   phone_finish.py     Sharpen + PNG grain + JPEG
