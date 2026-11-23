@@ -266,9 +266,10 @@ Video and CUDA only; `--benchmark` is refused (`summary.json` already times ever
 Use it to prepare a source clip for an H3 character swap. The performer is hidden under a heavy blur (so H3 cannot copy her identity or clothes), and her motion is drawn on top: the OpenPose-style body and hand skeleton, plus white dots on the eyebrows and mouth for expression. It is the recipe of the H3 swap that worked (run 28), in one process with no ComfyUI.
 
 1. **Decode once.** Every later step reads the same frames.
-2. **Prompt.** Sapiens2 pose (TensorRT FP16) checks every 6th frame from the start; the first frame with a person becomes the prompt frame (or `--prompt-frame N`), and her joints there become the SAM clicks. If SAM loses her on any frame, the run stops and names the frames, so no frame goes out unblurred.
-3. **Track.** SAM 3.1 runs from that frame, both directions, stride 2. With `--mask-prompt`, SAM 3's text mask on the prompt frame seeds the track instead of the clicks: the instances her joints fall inside, unioned (a part prompt like `head, hair` returns one instance per part). The SAM 3 detector comes from the SAM 3.1 checkpoint, so no gated download; it is freed before SAM 3.1 loads.
-4. **Pose, blur and draw on every frame.**
+2. **Shots.** Hard cuts are found as PySceneDetect's AdaptiveDetector finds them, at its defaults: a frame whose mean HSV change is at least 15 levels and 3x the average of the 2 frames on each side, shots at least 15 frames long. Each shot is tracked on its own, so SAM's memory of one shot never carries her into the next one, or the next one's subject back.
+3. **Prompt.** In each shot Sapiens2 pose (TensorRT FP16) checks every 6th frame from its start; the first frame with a person becomes the prompt frame (or `--prompt-frame N`, for its shot), and her joints there become the SAM clicks.
+4. **Track.** SAM 3.1 runs from that frame, both directions, stride 2. Frames where it loses her are prompted again the same way, each run of lost frames on its own, until no new prompt frame is left. Frames where pose finds nobody (black, a fade to black, an empty shot) keep an empty mask and go out as in the source; the run prints them and `summary.json` lists them under `empty_frames`. With `--mask-prompt`, SAM 3's text mask on the prompt frame seeds the track instead of the clicks: the instances her joints fall inside, unioned (a part prompt like `head, hair` returns one instance per part). A frame where no instance has one of her joints (a blended frame mid-dissolve, someone else) is passed over for the next one, so the track never starts from the clicks or a stranger's mask instead. The SAM 3 detector comes from the SAM 3.1 checkpoint, so no gated download; it is freed before SAM 3.1 loads (re-prompts after a loss hold both).
+5. **Pose, blur and draw on every frame.**
    - Pose runs inside her mask's box, so other people never get her skeleton.
    - The neck is the shoulders' midpoint, as in DWPose.
    - Face dots are thinned to DWPose's 68-point density: 29 dots (5 per brow, the 15-point outer lip ring and the inner lip's 4 corners and centres) against DWPose's 30. Denser clusters get painted into H3's output.
@@ -290,7 +291,7 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
 | `--include PARTS` | Draw only these parts, comma-separated: `head`, `face`, `torso`, `arms`, `hands`, `legs` (default: all). Face swap: `head,face` |
 | `--exclude PARTS` | Draw every part but these, e.g. `legs`; not with `--include` |
 | `--prompt-every 6` | Frames between pose checks when choosing the SAM prompt frame |
-| `--prompt-frame N` | Prompt SAM on frame N (her visible joints there become the clicks) instead of searching |
+| `--prompt-frame N` | Prompt SAM on frame N (her visible joints there become the clicks) instead of searching its shot |
 | `--threshold 0.3` | Keypoint score to trust and draw |
 
 Outputs `guide.mp4` (the `<Video 1>` to feed H3), `masks.npz`, `keypoints.npz` (`points [frames, 308, 2]`, `scores`, `names`) and `summary.json` (prompt frame, clicks, mask prompt, seconds per stage, peak VRAM).

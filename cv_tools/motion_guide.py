@@ -10,6 +10,7 @@ import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -80,41 +81,107 @@ def predict_person(pose, image, box=None):
     return points, scores
 
 
-def find_prompt(pose, frames, candidates, threshold):  # frames: BGR uint8 [frames, H, W, 3] on the GPU
-    """(frame index, her body joints as SAM clicks) on the first candidate frame where a person appears."""
+def shot_starts(frames, ratio=3.0, min_change=15.0, window=2, min_length=15):
+    """First frame of every shot, 0 included; frames: BGR uint8 [frames, H, W, 3]. A hard cut is PySceneDetect's
+    AdaptiveDetector at its defaults: the frame's mean HSV change from the one before is at least `min_change` levels and
+    `ratio` times the average change of the `window` frames on each side, and the shot before it is `min_length` frames or more."""
+    h, w = frames.shape[1:3]
+    scale = max(1, w // 256)  # PySceneDetect's working width: ~256 px
+    small = torch.cat([F.interpolate(frames[i:i + 64].permute(0, 3, 1, 2).float(), size=(h // scale, w // scale), mode="area")
+                       for i in range(0, len(frames), 64)]).round().to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+    hsv = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2HSV) for f in small]).astype(np.float32)
+    change = np.r_[0, np.abs(np.diff(hsv, axis=0)).mean(axis=(1, 2, 3))]
+    starts = [0]
+    # [Agent] Against the neighbours, not a fixed level: a whip pan changes every frame a lot, a cut changes one frame far more than the ones around it.
+    for i in range(window, len(change) - window):
+        around = np.r_[change[i - window:i], change[i + 1:i + window + 1]].mean()
+        if change[i] >= min_change and change[i] >= ratio * around and i - starts[-1] >= min_length:
+            starts.append(i)
+    return starts
+
+
+def find_people(pose, frames, candidates, threshold):  # frames: BGR uint8 [frames, H, W, 3] on the GPU
+    """Yields (frame index, her body joints as SAM clicks) for each candidate frame where a person appears, in order."""
     # [Agent] The first frame with a person, not the "clearest" one: ranking by joints x body area picked frame 84 of a
     # selfie that opens on her face, and SAM lost her tracking back through the camera swing (frames 0-34 unmasked).
     for index in candidates:
         points, scores = predict_person(pose, frames[index])
         visible = points[[i for i in pose.openpose_body if scores[i] >= threshold and np.isfinite(points[i]).all()]]
         if len(visible) >= 4:
-            return index, [tuple(map(float, p)) for p in visible]
-    raise ValueError("No person found in the clip")
+            yield index, [tuple(map(float, p)) for p in visible]
 
 
-def text_mask(frame, clicks, prompt):
-    """SAM 3's mask for `prompt` on one frame (BGR uint8 on the GPU): the union of the instances under her joint clicks, or None."""
+def text_model():
     from sam3.model.sam3_image_processor import Sam3Processor
     from sam3.model_builder import build_sam3_image_model
 
     # [Agent] The SAM 3.1 checkpoint carries the text-prompted detector too ("detector.*" keys); Meta's builder loads it
     # from the file we have. Only the RoPE buffers come up "missing": they are rebuilt at init, not learned.
-    model = build_sam3_image_model(checkpoint_path=str(CHECKPOINT), load_from_HF=False)
+    return Sam3Processor(build_sam3_image_model(checkpoint_path=str(CHECKPOINT), load_from_HF=False))
+
+
+def text_mask(processor, frame, clicks, prompt):
+    """SAM 3's mask for `prompt` on one frame (BGR uint8 on the GPU): the union of the instances under her joint clicks, or None."""
     with torch.autocast("cuda", dtype=torch.bfloat16), torch.inference_mode():
-        processor = Sam3Processor(model)
         state = processor.set_image(Image.fromarray(frame.flip(-1).cpu().numpy()))
         # [Agent] SAM 3 grounds one noun phrase per call, so "head, hair" runs each phrase on the same image features and pools every instance found.
         masks = np.concatenate([processor.set_text_prompt(prompt=phrase.strip(), state=state)["masks"].squeeze(1).float().cpu().numpy() > 0
                                 for phrase in prompt.split(",") if phrase.strip()])
-    del model, processor, state
-    torch.cuda.empty_cache()
-    if not len(masks):
-        return None
     # [Agent] Several people can be in frame (posters, passers-by): keep the instances her own joints fall inside. A union,
-    # not the best one, because a part prompt ("face, hair") returns one instance per part.
-    hits = [sum(bool(m[min(int(y), m.shape[0] - 1), min(int(x), m.shape[1] - 1)]) for x, y in clicks) for m in masks]
-    keep = [m for m, h in zip(masks, hits) if h] or [masks[int(np.argmax(hits))]]
-    return np.logical_or.reduce(keep)
+    # not the best one, because a part prompt ("face, hair") returns one instance per part. None of them under her
+    # joints means another person or a blended frame, so no seed rather than a guess.
+    keep = [m for m in masks if any(m[min(int(y), m.shape[0] - 1), min(int(x), m.shape[1] - 1)] for x, y in clicks)]
+    return np.logical_or.reduce(keep) if keep else None
+
+
+def empty_runs(masks, starts):
+    """[(first, end)] of the runs of frames with an empty mask, split where a shot starts."""
+    runs = []
+    for i, empty in enumerate((~masks.flatten(1).any(dim=1)).tolist()):
+        if empty and runs and runs[-1][1] == i and i not in starts:
+            runs[-1] = (runs[-1][0], i + 1)
+        elif empty:
+            runs.append((i, i + 1))
+    return runs
+
+
+def track_person(frames, pose, starts, args, timed):
+    """(masks bool [frames, H, W] on the GPU, prompts {frame: clicks}). Each shot is tracked on its own from its first frame
+    with a person; then every run of frames the track lost is prompted again on its first frame with a person and tracked on
+    its own, until no new prompt frame is left. Frames with nobody to find (black, a fade, an empty shot) stay empty."""
+    masks = torch.zeros(frames.shape[:3], dtype=torch.bool, device=frames.device)
+    spans, tracker, prompts, tried = list(zip(starts, starts[1:] + [len(frames)])), None, {}, set()
+    while spans:
+        found, processor = [], None
+        for first, end in spans:
+            forced = args.prompt_frame is not None and first <= args.prompt_frame < end and args.prompt_frame not in tried
+            people = find_people(pose, frames, [args.prompt_frame] if forced else
+                                 [i for i in range(first, end, args.prompt_every) if i not in tried], args.threshold)
+            while person := timed("find_prompt", lambda: next(people, None)):
+                frame, clicks = person
+                tried.add(frame)
+                if args.mask_prompt and processor is None:
+                    processor = timed("mask_prompt", text_model)
+                seed = timed("mask_prompt", lambda: text_mask(processor, frames[frame], clicks, args.mask_prompt)) if args.mask_prompt else None
+                # [Agent] With --mask-prompt the track must start from that text's mask: tracking her clicks instead turned a
+                # face prompt into a whole-body mask on a dissolve frame. So a frame without one passes to the next candidate.
+                if seed is not None or not args.mask_prompt:
+                    found.append((first, end, frame, clicks, seed))
+                    break
+        # [Agent] SAM 3 is freed before SAM 3.1 loads, so on the first round the two never share the card; later rounds hold both.
+        processor = None
+        torch.cuda.empty_cache()
+        if not found:
+            break
+        if tracker is None:
+            tracker = timed("load_tracker", load_tracker)
+        for first, end, frame, clicks, seed in found:
+            prompts[frame] = clicks
+            # [Agent] A lost run is tracked alone, so the frames the earlier track kept are never touched.
+            masks[first:end] = timed("track", lambda: track(tracker, frames[first:end], frame - first, points=clicks, mask=seed,
+                                                           stride=args.stride)[0])
+        spans = empty_runs(masks, starts)
+    return masks, prompts
 
 
 def mask_box(mask, pad=0.1):
@@ -223,7 +290,7 @@ def run(args):
     def timed(stage, work):
         started = time.perf_counter()
         result = work()
-        seconds[stage] = time.perf_counter() - started
+        seconds[stage] = seconds.get(stage, 0) + time.perf_counter() - started
         return result
 
     # [Agent] TensorRT adds syncs on the default stream; one explicit stream keeps the ordering without them.
@@ -233,19 +300,17 @@ def run(args):
         frames = timed("decode", lambda: torch.from_numpy(read_video(args.input, args.frames, args.size)).cuda())
         pose = timed("load_pose", lambda: load_pose(args.threshold, args.face, args.pose_res, args.pose_model))
         parts = args.include or [p for p in PARTS if p not in (args.exclude or [])]
-        candidates = [args.prompt_frame] if args.prompt_frame is not None else range(0, len(frames), args.prompt_every)
-        prompt_frame, clicks = timed("find_prompt", lambda: find_prompt(pose, frames, candidates, args.threshold))
-        # [Agent] SAM 3 runs and is freed before SAM 3.1 loads, so the two never share the card.
-        seed = timed("mask_prompt", lambda: text_mask(frames[prompt_frame], clicks, args.mask_prompt)) if args.mask_prompt else None
-        tracker = timed("load_tracker", load_tracker)
-        masks, _ = timed("track", lambda: track(tracker, frames, prompt_frame, points=clicks, mask=seed, stride=args.stride))
-        # [Agent] An empty mask means no blur and no pose on that frame; the guide would show the source person. Stop instead.
-        empty = (masks.flatten(1).sum(1) == 0).nonzero().flatten().tolist()
-        if empty:
-            raise SystemExit(f"SAM lost the person on {len(empty)} frames ({empty[0]}-{empty[-1]}); "
-                             f"started on frame {prompt_frame}. Pass --prompt-frame with a frame where the person is visible.")
-        tracker = None  # frees SAM's ~4 GB before pose and drawing
-        torch.cuda.empty_cache()
+        starts = timed("shots", lambda: shot_starts(frames))
+        masks, prompts = track_person(frames, pose, starts, args, timed)
+        lost = empty_runs(masks, [])
+        unmasked = sum(end - first for first, end in lost)
+        if unmasked == len(frames):
+            raise SystemExit("No person found in the clip")
+        # [Agent] An empty mask means no blur and no pose on that frame: right on black or a fade, a leak if she is there.
+        if lost:
+            print(f"motion_guide: no mask on {unmasked} frames ({', '.join(f'{first}-{end - 1}' for first, end in lost)}); "
+                  "they go out as in the source")
+        torch.cuda.empty_cache()  # SAM's ~4 GB, freed when track_person returned, before pose and drawing
         args.out.mkdir(parents=True, exist_ok=True)
         points, scores = timed("pose_draw_encode", lambda: write_guide(
             args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input,
@@ -255,7 +320,8 @@ def run(args):
                                                names=np.array(pose.names))))
     total = sum(seconds.values())
     summary = {"input": str(args.input), "frames": len(frames), "size_wh": [frames.shape[2], frames.shape[1]],
-               "prompt_frame": prompt_frame, "clicks": clicks, "mask_prompt": args.mask_prompt if seed is not None else None,
+               "shot_starts": starts, "prompt_frames": list(prompts), "clicks": prompts, "mask_prompt": args.mask_prompt,
+               "empty_frames": [[first, end - 1] for first, end in lost],
                "stride": args.stride, "pose_model": args.pose_model.name, "pose_res": args.pose_res,
                "face_dots": args.face, "face_dot_count": len(pose.openpose_face), "parts": parts,
                "seconds": {k: round(v, 2) for k, v in seconds.items()} | {"total": round(total, 2)},
@@ -264,7 +330,7 @@ def run(args):
                "peak_torch_vram_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2)}
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"motion_guide: {len(frames)} frames in {total:.1f}s ({summary['fps']} FPS), "
-          f"prompt frame {prompt_frame} -> {args.out}")
+          f"{len(starts)} shots, prompt frames {list(prompts)} -> {args.out}")
 
 
 def main():
@@ -290,7 +356,7 @@ def main():
                        "face swap: head,face")
     drawn.add_argument("--exclude", type=parts_list, help="Draw every part but these, e.g. legs")
     p.add_argument("--prompt-every", type=int, default=6, help="Frames between pose checks while looking for the first frame with a person")
-    p.add_argument("--prompt-frame", type=int, help="Start SAM on this frame instead of the first frame with a person")
+    p.add_argument("--prompt-frame", type=int, help="Start SAM on this frame instead of its shot's first frame with a person")
     p.add_argument("--threshold", type=float, default=0.3, help="Keypoint score to trust and draw (default 0.3)")
     run(parse(p, "motion_guide"))
 
