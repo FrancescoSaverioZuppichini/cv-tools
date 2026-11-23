@@ -255,6 +255,9 @@ python -m cv_tools.motion_guide --input reel.mp4 --output runs/motion_guide/reel
 python -m cv_tools.motion_guide --input reel.mp4 --size 0.5 --face none
 python -m cv_tools.motion_guide --input reel.mp4 --pose-model 0.8b   # bigger Sapiens2 pose; its engine builds on first use
 python -m cv_tools.motion_guide --input reel.mp4 --mask-prompt person --mask-grow 0.05   # SAM 3 text mask as the seed, wider blur
+python -m cv_tools.motion_guide --input selfie.mp4 --mask-prompt "head, hair" --mask-grow 0.02 --include head,face   # face swap: head lines + brow/mouth dots only
+python -m cv_tools.motion_guide --input reel.mp4 --mask-prompt person --exclude legs   # waist-up clip: no leg lines
+python -m cv_tools.motion_guide --input reel.mp4 --include head,face,hands   # head, face dots and hands, no body skeleton
 ```
 
 Video and CUDA only; `--benchmark` is refused (`summary.json` already times every stage).
@@ -271,6 +274,7 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
    - The blur is applied inside the mask grown by `--mask-grow` (default 1 % of the long side) with a 2 px feather.
    - The blur, mask growth and feather run on the GPU (torch + torchvision): 58 dB to the OpenCV version, a few ms per frame.
    - Only the drawing's bright pixels are pasted, as in the original recipe, so there is no dark fringe.
+   - `--include` / `--exclude` pick the parts drawn: `head` (nose, eyes, ears), `face` (the dots `--face` picks), `torso` (neck, shoulders, hips), `arms`, `hands`, `legs`. A shoulder or hip belongs to two parts and is drawn when either is in; a limb needs both its joints. A face swap draws only `head,face`: the body stays visible, so a skeleton over it adds nothing H3 cannot see and is what it can paint into the render. `keypoints.npz` keeps every point either way.
    - Encoding is libx264 CRF 14, on a worker thread with one frame in flight while the GPU runs the next frame's pose.
 
 | Flag | Meaning |
@@ -282,6 +286,8 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
 | `--mask-grow 0.01` | Blur area grown beyond the mask, as a fraction of the long side; wider hides what sticks out of the mask (flyaway hair, straps) |
 | `--blur-div 15` | Blur sigma = longest side / this; 15 is run 28's heavy blur |
 | `--face brows_mouth\|all\|none` | Face dots (default eyebrows + mouth) |
+| `--include PARTS` | Draw only these parts, comma-separated: `head`, `face`, `torso`, `arms`, `hands`, `legs` (default: all). Face swap: `head,face` |
+| `--exclude PARTS` | Draw every part but these, e.g. `legs`; not with `--include` |
 | `--prompt-every 6` | Frames between pose checks when choosing the SAM prompt frame |
 | `--prompt-frame N` | Prompt SAM on frame N (her visible joints there become the clicks) instead of searching |
 | `--threshold 0.3` | Keypoint score to trust and draw |

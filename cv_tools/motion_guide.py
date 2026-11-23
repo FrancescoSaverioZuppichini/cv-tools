@@ -19,7 +19,15 @@ from torchvision.transforms.v2.functional import gaussian_blur
 from cv_tools.cli import parse
 from cv_tools.media import get_fps
 from cv_tools.sam31 import CHECKPOINT, load_tracker, read_video, track
-from cv_tools.sapiens2.pose import RESOLUTIONS, Pose, pose_engine, pose_model
+from cv_tools.sapiens2.pose import OPENPOSE_BODY, RESOLUTIONS, Pose, pose_engine, pose_model
+
+# [Agent] The parts --include / --exclude pick, as DWPose draws them. A joint shared by two parts (a shoulder, a hip) is drawn
+# [Agent] when either part is in; a limb is drawn only when both its joints are. hands and face are their own point sets.
+BODY_PARTS = {"head": ["nose", "right_eye", "left_eye", "right_ear", "left_ear"],
+              "torso": ["neck", "right_shoulder", "left_shoulder", "right_hip", "left_hip"],
+              "arms": ["right_shoulder", "right_elbow", "right_wrist", "left_shoulder", "left_elbow", "left_wrist"],
+              "legs": ["right_hip", "right_knee", "right_ankle", "left_hip", "left_knee", "left_ankle"]}
+PARTS = ["head", "face", "torso", "arms", "hands", "legs"]
 
 
 def is_dwpose_face_point(name):
@@ -42,6 +50,24 @@ def load_pose(threshold, face, resolution, model):
     pose.openpose_face = {"all": pose.openpose_face, "none": [],
                           "brows_mouth": [i for i in pose.openpose_face if is_dwpose_face_point(pose.names[i])]}[face]
     return pose
+
+
+def part_points(pose, parts):
+    """Bool [points]: the keypoints the drawing keeps for these parts."""
+    body = dict(zip(OPENPOSE_BODY, pose.openpose_body))
+    points = {"face": pose.openpose_face, "hands": [i for hand in pose.openpose_hands for i in hand]}
+    keep = np.zeros(len(pose.names), bool)
+    for part in parts:
+        ids = points[part] if part in points else [body[n] for n in BODY_PARTS[part]]
+        keep[[i for i in ids if i is not None]] = True
+    return keep
+
+
+def parts_list(text):
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts or set(parts) - set(PARTS):
+        raise argparse.ArgumentTypeError(f"parts are {', '.join(PARTS)}, comma-separated")
+    return parts
 
 
 def predict_person(pose, image, box=None):
@@ -150,9 +176,9 @@ def h264_writer(path, w, h, fps, audio=None):
             raise RuntimeError(f"ffmpeg failed writing {path}")
 
 
-def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01, audio=None):
-    """Pose each frame inside her mask's box, then draw, blur and encode it. frames (BGR uint8) and masks live on the GPU;
-    returns (points, scores) per frame."""
+def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01, audio=None, keep=None):
+    """Pose each frame inside her mask's box, then draw the `keep` points (part_points; all when None), blur and encode it.
+    frames (BGR uint8) and masks live on the GPU; returns (points, scores) per frame, every point, drawn or not."""
     total, h, w = frames.shape[:3]
     points = np.full((total, len(pose.names), 2), np.nan, np.float32)
     scores = np.zeros((total, len(pose.names)), np.float32)
@@ -165,7 +191,8 @@ def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01
             if not has_person[index]:
                 return write(frames[index].cpu().numpy())
             # [Agent] The skeleton is drawn on the CPU (OpenCV); the frame and mask never leave the GPU.
-            drawing = torch.from_numpy(pose.draw_dwpose(blank, points[index], scores[index])[0]).cuda()
+            drawn = scores[index] if keep is None else np.where(keep, scores[index], 0)
+            drawing = torch.from_numpy(pose.draw_dwpose(blank, points[index], drawn)[0]).cuda()
             write(compose(frames[index], masks[index], drawing, blur_div, mask_grow).cpu().numpy())
 
     # [Agent] One worker draws, composes and encodes frame i while the GPU runs frame i+1's pose. Waiting for the previous
@@ -205,6 +232,7 @@ def run(args):
         # [Agent] The clip goes to the GPU once (reel01: ~0.6 GB); SAM, pose and the composite all read it there.
         frames = timed("decode", lambda: torch.from_numpy(read_video(args.input, args.frames, args.size)).cuda())
         pose = timed("load_pose", lambda: load_pose(args.threshold, args.face, args.pose_res, args.pose_model))
+        parts = args.include or [p for p in PARTS if p not in (args.exclude or [])]
         candidates = [args.prompt_frame] if args.prompt_frame is not None else range(0, len(frames), args.prompt_every)
         prompt_frame, clicks = timed("find_prompt", lambda: find_prompt(pose, frames, candidates, args.threshold))
         # [Agent] SAM 3 runs and is freed before SAM 3.1 loads, so the two never share the card.
@@ -220,7 +248,8 @@ def run(args):
         torch.cuda.empty_cache()
         args.out.mkdir(parents=True, exist_ok=True)
         points, scores = timed("pose_draw_encode", lambda: write_guide(
-            args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input))
+            args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input,
+            part_points(pose, parts)))
     timed("save", lambda: (np.savez_compressed(args.out / "masks.npz", masks=masks.cpu().numpy()),
                            np.savez_compressed(args.out / "keypoints.npz", points=points, scores=scores,
                                                names=np.array(pose.names))))
@@ -228,7 +257,7 @@ def run(args):
     summary = {"input": str(args.input), "frames": len(frames), "size_wh": [frames.shape[2], frames.shape[1]],
                "prompt_frame": prompt_frame, "clicks": clicks, "mask_prompt": args.mask_prompt if seed is not None else None,
                "stride": args.stride, "pose_model": args.pose_model.name, "pose_res": args.pose_res,
-               "face_dots": args.face, "face_dot_count": len(pose.openpose_face),
+               "face_dots": args.face, "face_dot_count": len(pose.openpose_face), "parts": parts,
                "seconds": {k: round(v, 2) for k, v in seconds.items()} | {"total": round(total, 2)},
                "fps": round(len(frames) / total, 2),
                # [Agent] PyTorch's allocator only: the TensorRT pose engine's memory is not counted here.
@@ -256,6 +285,10 @@ def main():
     p.add_argument("--blur-div", type=float, default=15, help="Blur sigma = longest side / this (default 15: heavy)")
     p.add_argument("--face", choices=["brows_mouth", "all", "none"], default="brows_mouth",
                    help="Face dots: eyebrows + mouth at DWPose density (default), all Sapiens face dots, or none")
+    drawn = p.add_mutually_exclusive_group()
+    drawn.add_argument("--include", type=parts_list, help=f"Draw only these parts, comma-separated ({', '.join(PARTS)}); "
+                       "face swap: head,face")
+    drawn.add_argument("--exclude", type=parts_list, help="Draw every part but these, e.g. legs")
     p.add_argument("--prompt-every", type=int, default=6, help="Frames between pose checks while looking for the first frame with a person")
     p.add_argument("--prompt-frame", type=int, help="Start SAM on this frame instead of the first frame with a person")
     p.add_argument("--threshold", type=float, default=0.3, help="Keypoint score to trust and draw (default 0.3)")
