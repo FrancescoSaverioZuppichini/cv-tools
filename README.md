@@ -229,7 +229,7 @@ Use it to get a person's (or any object's) mask on every frame of a clip, from o
 
 Outputs `masks.npz` (`masks`: bool `[frames, H, W]`, lossless), `masks.jsonl` (per-frame RLE, as in `sam3`), `overlay.mp4`, `masks.mp4`.
 
-From Python: `load_tracker()`, `read_video(path, limit, size)` and `track(model, frames, prompt_frame, points=..., stride=...)` return the masks without writing anything. `motion_guide` uses them this way.
+From Python: `load_tracker()`, `read_video(path, limit, size)` and `track(model, frames, prompt_frame, prompts, stride=...)` return the masks without writing anything, one `[frames, H, W]` per prompt (`{"points": [...]}` or `{"mask": ...}`). Each object gets its own tracker state and the states step through the clip together, so the image encoder runs once per frame for all of them; each mask is bit-identical to tracking it alone. `motion_guide` uses them this way.
 
 **Backend.**
 - Meta's `facebookresearch/sam3` in tracker-only mode. Meta's default video predictor runs the text detector on every frame: 2× slower, and it loses click-only objects.
@@ -290,11 +290,20 @@ Use it to prepare a source clip for an H3 character swap. The performer is hidde
 | `--face brows_mouth\|all\|none` | Face dots (default eyebrows + mouth) |
 | `--include PARTS` | Draw only these parts, comma-separated: `head`, `face`, `torso`, `arms`, `hands`, `legs` (default: all). Face swap: `head,face` |
 | `--exclude PARTS` | Draw every part but these, e.g. `legs`; not with `--include` |
+| `--color` | Tint the blur per region: face green, hair red, the rest of her blue; see below |
 | `--prompt-every 6` | Frames between pose checks when choosing the SAM prompt frame |
 | `--prompt-frame N` | Prompt SAM on frame N (her visible joints there become the clicks) instead of searching its shot |
 | `--threshold 0.3` | Keypoint score to trust and draw |
 
 Outputs `guide.mp4` (the `<Video 1>` to feed H3), `masks.npz`, `keypoints.npz` (`points [frames, 308, 2]`, `scores`, `names`) and `summary.json` (prompt frame, clicks, mask prompt, seconds per stage, peak VRAM).
+
+**`--color`** mixes a flat tint into the blur (55 %, before the drawing goes on), so H3 can tell her parts apart under it: face green, hair red, the rest of her blue. A region is tinted only when its part is drawn: `face` → face, `head` → hair, `torso`/`arms`/`hands`/`legs` → body. Face and hair are SAM 3 `face` / `hair` tracks, prompted per shot and re-prompted like the main mask, each in its own tracker state stepping with the main one, so the image encoder still runs once. `masks.npz` stays the blur mask; without the flag the guide is unchanged.
+
+```bash
+python -m cv_tools.motion_guide --input clip.mp4 --mask-prompt person --mask-grow 0 --color   # face swap: --mask-prompt "head, hair" --include head,face --color
+```
+
+RTX 4090, upright-full (428 frames, 1024×576): 44.6 s → 50.4 s with `--color` (track 13.8 → 19.5 s, peak VRAM 6.1 → 7.9 GB); the old flow (three `motion_guide` runs + a tinting pass) took 145 s.
 
 **Benchmark vs the ComfyUI pipeline it replaces**: `persontrack.py` (DWPose + MediaPipe + SAM 3.1 node, run twice) then `vidprep2.py` (DWPose again, CPU blur, drawing). RTX 3090, same clips, back to back, 13 Nov 2026.
 

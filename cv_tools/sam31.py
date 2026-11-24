@@ -128,11 +128,22 @@ def covered_range(direction, prompt_frame, total):
     return (prompt_frame if direction == "forward" else 0, prompt_frame if direction == "backward" else total - 1)
 
 
+def add_prompt(model, state, frame, points=(), negative=(), mask=None):
+    """Prompts the state's one object on `frame`: by a bool mask [H, W] when given, else by pixel clicks."""
+    if mask is not None:
+        model.add_new_masks(state, frame_idx=frame, obj_ids=[1], masks=torch.as_tensor(mask, device="cuda")[None])
+    else:
+        h, w = state["video_height"], state["video_width"]
+        clicks = torch.tensor([[x / w, y / h] for x, y in [*points, *negative]], dtype=torch.float32)
+        labels = torch.tensor([1] * len(points) + [0] * len(negative), dtype=torch.int32)
+        model.add_new_points(state, frame_idx=frame, obj_id=1, points=clicks, labels=labels, clear_old_points=True)
+
+
 @torch.inference_mode()
-def track(model, frames, prompt_frame, points=(), negative=(), mask=None, direction="both", stride=2, batch=8):
-    """(masks bool [frames, H, W] on the GPU, tracking seconds) for one object prompted on `prompt_frame` by pixel clicks
-    or a mask. frames: BGR uint8 [frames, H, W, 3] on the GPU. With stride N every Nth frame is tracked and each frame
-    between gets the union of its two tracked neighbours."""
+def track(model, frames, prompt_frame, prompts, direction="both", stride=2, batch=8):
+    """(masks bool [objects, frames, H, W] on the GPU, tracking seconds): one object per prompt (add_prompt's points,
+    negative or mask), all prompted on `prompt_frame`. frames: BGR uint8 [frames, H, W, 3] on the GPU. With stride N every
+    Nth frame is tracked and each frame between gets the union of its two tracked neighbours."""
     total, h, w = frames.shape[:3]
     if not 0 <= prompt_frame < total:
         raise ValueError(f"Prompt frame {prompt_frame} is outside the clip's {total} frames")
@@ -140,33 +151,32 @@ def track(model, frames, prompt_frame, points=(), negative=(), mask=None, direct
     tracked = frames[offset::stride]
     model._get_image_feature = batched_encoder(model, tracked, batch, first_step=-1 if direction == "backward" else 1)
     try:
-        state = model.init_state(video_height=h, video_width=w, num_frames=len(tracked))
+        # [Agent] One state per object: SAM 3.1 keeps the objects of one state apart pixel by pixel, which emptied a face
+        # [Agent] tracked inside its person. The states step through the clip together, so each frame's cached encoder
+        # [Agent] output (~80 % of a pass) serves all of them, and every mask is bit-identical to tracking it alone.
+        states = [model.init_state(video_height=h, video_width=w, num_frames=len(tracked)) for _ in prompts]
         torch.cuda.synchronize()
         started = time.perf_counter()
         with torch.autocast("cuda", dtype=DTYPE):
-            if mask is not None:
-                model.add_new_masks(state, frame_idx=start, obj_ids=[1], masks=torch.as_tensor(mask, device="cuda")[None])
-            else:
-                clicks = torch.tensor([[x / w, y / h] for x, y in [*points, *negative]], dtype=torch.float32)
-                labels = torch.tensor([1] * len(points) + [0] * len(negative), dtype=torch.int32)
-                model.add_new_points(state, frame_idx=start, obj_id=1, points=clicks, labels=labels, clear_old_points=True)
-            model.propagate_in_video_preflight(state, run_mem_encoder=True)
+            for state, prompt in zip(states, prompts):
+                add_prompt(model, state, start, **prompt)
+                model.propagate_in_video_preflight(state, run_mem_encoder=True)
             masks = {}
             for reverse in {"both": (False, True), "forward": (False,), "backward": (True,)}[direction]:
-                for frame_idx, _, _, video_masks, *_ in model.propagate_in_video(
-                        state, start_frame_idx=start, max_frame_num_to_track=None, reverse=reverse, tqdm_disable=True):
-                    masks[offset + frame_idx * stride] = video_masks[0, 0] > 0
+                for steps in zip(*(model.propagate_in_video(state, start_frame_idx=start, max_frame_num_to_track=None,
+                                                             reverse=reverse, tqdm_disable=True) for state in states)):
+                    masks[offset + steps[0][0] * stride] = torch.stack([video_masks[0, 0] > 0 for _, _, _, video_masks, *_ in steps])
         torch.cuda.synchronize()
         seconds = time.perf_counter() - started
     finally:
         del model._get_image_feature  # restores Meta's method and breaks the closure's reference to the model
-    out = torch.zeros((total, h, w), dtype=torch.bool, device="cuda")
+    out = torch.zeros((len(prompts), total, h, w), dtype=torch.bool, device="cuda")
     known = sorted(masks)
     first, last = covered_range(direction, prompt_frame, total)
     for f in range(first, last + 1):
         # [Agent] The union over-covers a fast move rather than cutting a limb off: the safe failure for a blur mask.
         i = np.searchsorted(known, f)
-        out[f] = masks[f] if f in masks else masks[known[max(i - 1, 0)]] | masks[known[min(i, len(known) - 1)]]
+        out[:, f] = masks[f] if f in masks else masks[known[max(i - 1, 0)]] | masks[known[min(i, len(known) - 1)]]
     return out, seconds
 
 
@@ -179,9 +189,9 @@ def process(model, frames, args, destination, fps):
     mask = None
     if args.mask:
         mask = cv2.resize(cv2.imread(str(args.mask), cv2.IMREAD_GRAYSCALE), (w, h), interpolation=cv2.INTER_NEAREST) > 127
-    masks, seconds = track(model, torch.from_numpy(frames).cuda(), args.frame, points_from(args.points),
-                           points_from(args.negative), mask, args.direction, args.stride, args.batch)
-    masks = masks.cpu().numpy()
+    prompt = {"points": points_from(args.points), "negative": points_from(args.negative), "mask": mask}
+    masks, seconds = track(model, torch.from_numpy(frames).cuda(), args.frame, [prompt], args.direction, args.stride, args.batch)
+    masks = masks[0].cpu().numpy()
     destination.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(destination / "masks.npz", masks=masks)
 

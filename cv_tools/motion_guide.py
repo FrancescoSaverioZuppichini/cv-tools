@@ -8,6 +8,7 @@ import os
 import subprocess
 import time
 import types
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -29,6 +30,9 @@ BODY_PARTS = {"head": ["nose", "right_eye", "left_eye", "right_ear", "left_ear"]
               "arms": ["right_shoulder", "right_elbow", "right_wrist", "left_shoulder", "left_elbow", "left_wrist"],
               "legs": ["right_hip", "right_knee", "right_ankle", "left_hip", "left_knee", "left_ankle"]}
 PARTS = ["head", "face", "torso", "arms", "hands", "legs"]
+# [Agent] --color, approved 2026-11-23: a BGR tint per label_regions label (0 none, 1 face green, 2 hair red, 3 body blue),
+# [Agent] mixed 55 % into the blur so H3 can tell her parts apart where the blur hides them.
+TINT = {"colors": [(0, 0, 0), (60, 190, 60), (40, 40, 210), (200, 90, 30)], "alpha": 0.55}
 
 
 def is_dwpose_face_point(name):
@@ -120,18 +124,26 @@ def text_model():
     return Sam3Processor(build_sam3_image_model(checkpoint_path=str(CHECKPOINT), load_from_HF=False))
 
 
-def text_mask(processor, frame, clicks, prompt):
-    """SAM 3's mask for `prompt` on one frame (BGR uint8 on the GPU): the union of the instances under her joint clicks, or None."""
+def text_masks(processor, frame, clicks, texts):
+    """SAM 3's mask for each text on one frame (BGR uint8 on the GPU): the union of the instances under her joint clicks,
+    or None (always None for a None text)."""
+    found = []
     with torch.autocast("cuda", dtype=torch.bfloat16), torch.inference_mode():
         state = processor.set_image(Image.fromarray(frame.flip(-1).cpu().numpy()))
-        # [Agent] SAM 3 grounds one noun phrase per call, so "head, hair" runs each phrase on the same image features and pools every instance found.
-        masks = np.concatenate([processor.set_text_prompt(prompt=phrase.strip(), state=state)["masks"].squeeze(1).float().cpu().numpy() > 0
-                                for phrase in prompt.split(",") if phrase.strip()])
-    # [Agent] Several people can be in frame (posters, passers-by): keep the instances her own joints fall inside. A union,
-    # not the best one, because a part prompt ("face, hair") returns one instance per part. None of them under her
-    # joints means another person or a blended frame, so no seed rather than a guess.
-    keep = [m for m in masks if any(m[min(int(y), m.shape[0] - 1), min(int(x), m.shape[1] - 1)] for x, y in clicks)]
-    return np.logical_or.reduce(keep) if keep else None
+        for text in texts:
+            if text is None:
+                found.append(None)
+                continue
+            # [Agent] SAM 3 grounds one noun phrase per call, so "head, hair" runs each phrase on the same image features and
+            # [Agent] pools every instance found. Every text reuses those features: one image pass per frame.
+            masks = np.concatenate([processor.set_text_prompt(prompt=phrase.strip(), state=state)["masks"].squeeze(1).float().cpu().numpy() > 0
+                                    for phrase in text.split(",") if phrase.strip()])
+            # [Agent] Several people can be in frame (posters, passers-by): keep the instances her own joints fall inside. A union,
+            # not the best one, because a part prompt ("face, hair") returns one instance per part. None of them under her
+            # joints means another person or a blended frame, so no seed rather than a guess.
+            keep = [m for m in masks if any(m[min(int(y), m.shape[0] - 1), min(int(x), m.shape[1] - 1)] for x, y in clicks)]
+            found.append(np.logical_or.reduce(keep) if keep else None)
+    return found
 
 
 def empty_runs(masks, starts):
@@ -145,43 +157,66 @@ def empty_runs(masks, starts):
     return runs
 
 
-def track_person(frames, pose, starts, args, timed):
-    """(masks bool [frames, H, W] on the GPU, prompts {frame: clicks}). Each shot is tracked on its own from its first frame
-    with a person; then every run of frames the track lost is prompted again on its first frame with a person and tracked on
-    its own, until no new prompt frame is left. Frames with nobody to find (black, a fade, an empty shot) stay empty."""
-    masks = torch.zeros(frames.shape[:3], dtype=torch.bool, device=frames.device)
-    spans, tracker, prompts, tried = list(zip(starts, starts[1:] + [len(frames)])), None, {}, set()
+def track_person(frames, pose, starts, texts, args, timed):
+    """([masks bool [frames, H, W] on the GPU] one per text, prompts {frame: clicks}). A text is the SAM 3 prompt its track
+    starts from; None starts it from her joint clicks. Each shot is tracked on its own from its first frame with a person
+    (and the text's mask); then every run of frames a track lost is prompted again the same way and tracked on its own,
+    until no new prompt frame is left. Frames with nobody to find (black, a fade, an empty shot) stay empty."""
+    masks = [torch.zeros(frames.shape[:3], dtype=torch.bool, device=frames.device) for _ in texts]
+    spans = {shot: list(range(len(texts))) for shot in zip(starts, starts[1:] + [len(frames)])}
+    tracker, processor, prompts, tried = None, None, {}, defaultdict(set)  # tried: frame -> texts looked for there
     while spans:
-        found, processor = [], None
-        for first, end in spans:
-            forced = args.prompt_frame is not None and first <= args.prompt_frame < end and args.prompt_frame not in tried
+        found = {}
+        for (first, end), waiting in spans.items():
+            # [Agent] A frame stays a candidate until every text still waiting in this span has been looked for there.
+            forced = (args.prompt_frame is not None and first <= args.prompt_frame < end
+                      and not tried[args.prompt_frame] >= set(waiting))
             people = find_people(pose, frames, [args.prompt_frame] if forced else
-                                 [i for i in range(first, end, args.prompt_every) if i not in tried], args.threshold)
-            while person := timed("find_prompt", lambda: next(people, None)):
+                                 [i for i in range(first, end, args.prompt_every) if not tried[i] >= set(waiting)], args.threshold)
+            while waiting and (person := timed("find_prompt", lambda: next(people, None))):
                 frame, clicks = person
-                tried.add(frame)
-                if args.mask_prompt and processor is None:
-                    processor = timed("mask_prompt", text_model)
-                seed = timed("mask_prompt", lambda: text_mask(processor, frames[frame], clicks, args.mask_prompt)) if args.mask_prompt else None
-                # [Agent] With --mask-prompt the track must start from that text's mask: tracking her clicks instead turned a
-                # face prompt into a whole-body mask on a dissolve frame. So a frame without one passes to the next candidate.
-                if seed is not None or not args.mask_prompt:
-                    found.append((first, end, frame, clicks, seed))
-                    break
-        # [Agent] SAM 3 is freed before SAM 3.1 loads, so on the first round the two never share the card; later rounds hold both.
-        processor = None
-        torch.cuda.empty_cache()
+                asked = [t for t in waiting if t not in tried[frame]]
+                tried[frame].update(asked)
+                seeds = [None] * len(asked)
+                if any(texts[t] for t in asked):
+                    if processor is None:
+                        processor = timed("mask_prompt", text_model)
+                    seeds = timed("mask_prompt", lambda: text_masks(processor, frames[frame], clicks, [texts[t] for t in asked]))
+                # [Agent] A track with a text must start from that text's mask: tracking her clicks instead turned a face
+                # prompt into a whole-body mask on a dissolve frame. So a frame without one passes to the next candidate.
+                for t, seed in zip(asked, seeds):
+                    if seed is not None or texts[t] is None:
+                        found.setdefault((first, end, frame), []).append((t, seed))
+                        prompts[frame] = clicks
+                        waiting.remove(t)
         if not found:
             break
         if tracker is None:
+            # [Agent] SAM 3 is freed before SAM 3.1 loads, so on the first round the two never share the card; re-prompt rounds keep both.
+            processor = None
+            torch.cuda.empty_cache()
             tracker = timed("load_tracker", load_tracker)
-        for first, end, frame, clicks, seed in found:
-            prompts[frame] = clicks
-            # [Agent] A lost run is tracked alone, so the frames the earlier track kept are never touched.
-            masks[first:end] = timed("track", lambda: track(tracker, frames[first:end], frame - first, points=clicks, mask=seed,
-                                                           stride=args.stride)[0])
-        spans = empty_runs(masks, starts)
+        for (first, end, frame), seeded in found.items():
+            # [Agent] A lost run is tracked alone, so the frames the earlier track kept are never touched. The texts seeded
+            # [Agent] on one frame are tracked in one pass.
+            tracked = timed("track", lambda: track(tracker, frames[first:end], frame - first,
+                                                   [{"points": prompts[frame], "mask": seed} for _, seed in seeded], stride=args.stride)[0])
+            for (t, _), mask in zip(seeded, tracked):
+                masks[t][first:end] = mask
+        spans = {}
+        for t, mask in enumerate(masks):
+            for run in empty_runs(mask, starts):
+                spans.setdefault(run, []).append(t)
     return masks, prompts
+
+
+def label_regions(face, hair, parts):
+    """uint8 [frames, H, W]: each pixel's TINT row, face over hair over the rest of her (body). A region is labelled only
+    when its part is drawn (face: face, head: hair, torso/arms/hands/legs: body); 0 leaves it untinted."""
+    body = bool(set(parts) & {"torso", "arms", "hands", "legs"})
+    labels = torch.full(face.shape, 3 if body else 0, dtype=torch.uint8, device=face.device)
+    labels.masked_fill_(hair, 2 if "head" in parts else 0)
+    return labels.masked_fill_(face, 1 if "face" in parts else 0)
 
 
 def mask_box(mask, pad=0.1):
@@ -211,14 +246,22 @@ def heavy_blur(image, sigma):
     return F.interpolate(blur(small, sigma), size=(h, w), mode="bilinear", align_corners=False)
 
 
-def compose(frame, mask, drawing, blur_div, mask_grow=0.01):
-    """GPU: the frame blurred inside the mask (grown by `mask_grow` of the long side in total, 2 px feather), the drawing on top. uint8 [H, W, 3]."""
+def compose(frame, mask, drawing, blur_div, mask_grow=0.01, labels=None):
+    """GPU: the frame blurred inside the mask (grown by `mask_grow` of the long side in total, 2 px feather), the blur
+    tinted by `labels` (label_regions' frame) when given, the drawing on top. uint8 [H, W, 3]."""
     h, w = mask.shape
     image = frame.permute(2, 0, 1)[None].float()
     grow = max(3, int(mask_grow * max(w, h)) | 1)
     # [Agent] A max-pool with stride 1 is a square dilation, OpenCV's dilate with a ones kernel.
     alpha = blur(F.max_pool2d(mask[None, None].float(), grow, stride=1, padding=grow // 2), 2.0)
-    out = (image * (1 - alpha) + heavy_blur(image, max(w, h) / blur_div) * alpha)[0].permute(1, 2, 0)
+    blurred = heavy_blur(image, max(w, h) / blur_div)
+    if labels is not None:
+        # [Agent] The tint goes into the blur, not onto the finished frame: it stays inside the blurred area, fades with
+        # [Agent] its feather, and the drawing pasted after it keeps its own colours.
+        tint = torch.tensor(TINT["colors"], dtype=torch.float32, device=labels.device)[labels.long()].permute(2, 0, 1)[None]
+        weight = (labels > 0) * TINT["alpha"]
+        blurred = blurred * (1 - weight) + tint * weight
+    out = (image * (1 - alpha) + blurred * alpha)[0].permute(1, 2, 0)
     # [Agent] Only the drawing's bright pixels replace the frame: its dark anti-aliased edges would leave a dark fringe.
     drawn = drawing.amax(dim=2) > 30
     out[drawn] = drawing[drawn].float()
@@ -243,9 +286,10 @@ def h264_writer(path, w, h, fps, audio=None):
             raise RuntimeError(f"ffmpeg failed writing {path}")
 
 
-def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01, audio=None, keep=None):
-    """Pose each frame inside her mask's box, then draw the `keep` points (part_points; all when None), blur and encode it.
-    frames (BGR uint8) and masks live on the GPU; returns (points, scores) per frame, every point, drawn or not."""
+def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01, audio=None, keep=None, labels=None):
+    """Pose each frame inside her mask's box, then draw the `keep` points (part_points; all when None), blur (tinted by
+    label_regions' `labels` when given) and encode it. frames (BGR uint8), masks and labels live on the GPU; returns
+    (points, scores) per frame, every point, drawn or not."""
     total, h, w = frames.shape[:3]
     points = np.full((total, len(pose.names), 2), np.nan, np.float32)
     scores = np.zeros((total, len(pose.names)), np.float32)
@@ -260,7 +304,8 @@ def write_guide(path, frames, masks, pose, blur_div, fps, stream, mask_grow=0.01
             # [Agent] The skeleton is drawn on the CPU (OpenCV); the frame and mask never leave the GPU.
             drawn = scores[index] if keep is None else np.where(keep, scores[index], 0)
             drawing = torch.from_numpy(pose.draw_dwpose(blank, points[index], drawn)[0]).cuda()
-            write(compose(frames[index], masks[index], drawing, blur_div, mask_grow).cpu().numpy())
+            write(compose(frames[index], masks[index], drawing, blur_div, mask_grow,
+                          None if labels is None else labels[index]).cpu().numpy())
 
     # [Agent] One worker draws, composes and encodes frame i while the GPU runs frame i+1's pose. Waiting for the previous
     # [Agent] frame before queueing the next keeps one frame in flight and raises a failure on the frame that caused it.
@@ -301,7 +346,10 @@ def run(args):
         pose = timed("load_pose", lambda: load_pose(args.threshold, args.face, args.pose_res, args.pose_model))
         parts = args.include or [p for p in PARTS if p not in (args.exclude or [])]
         starts = timed("shots", lambda: shot_starts(frames))
-        masks, prompts = track_person(frames, pose, starts, args, timed)
+        texts = [args.mask_prompt] + (["face", "hair"] if args.color else [])
+        masks, prompts = track_person(frames, pose, starts, texts, args, timed)
+        labels = label_regions(*masks[1:], parts) if args.color else None
+        masks = masks[0]
         lost = empty_runs(masks, [])
         unmasked = sum(end - first for first, end in lost)
         if unmasked == len(frames):
@@ -314,14 +362,14 @@ def run(args):
         args.out.mkdir(parents=True, exist_ok=True)
         points, scores = timed("pose_draw_encode", lambda: write_guide(
             args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input,
-            part_points(pose, parts)))
+            part_points(pose, parts), labels))
     timed("save", lambda: (np.savez_compressed(args.out / "masks.npz", masks=masks.cpu().numpy()),
                            np.savez_compressed(args.out / "keypoints.npz", points=points, scores=scores,
                                                names=np.array(pose.names))))
     total = sum(seconds.values())
     summary = {"input": str(args.input), "frames": len(frames), "size_wh": [frames.shape[2], frames.shape[1]],
                "shot_starts": starts, "prompt_frames": list(prompts), "clicks": prompts, "mask_prompt": args.mask_prompt,
-               "empty_frames": [[first, end - 1] for first, end in lost],
+               "color": args.color, "empty_frames": [[first, end - 1] for first, end in lost],
                "stride": args.stride, "pose_model": args.pose_model.name, "pose_res": args.pose_res,
                "face_dots": args.face, "face_dot_count": len(pose.openpose_face), "parts": parts,
                "seconds": {k: round(v, 2) for k, v in seconds.items()} | {"total": round(total, 2)},
@@ -355,6 +403,8 @@ def main():
     drawn.add_argument("--include", type=parts_list, help=f"Draw only these parts, comma-separated ({', '.join(PARTS)}); "
                        "face swap: head,face")
     drawn.add_argument("--exclude", type=parts_list, help="Draw every part but these, e.g. legs")
+    p.add_argument("--color", action="store_true", help="Tint the blur per region so H3 tells her parts apart: face green, "
+                   "hair red, the rest of her blue, each only when its part is drawn (face; head; torso, arms, hands or legs)")
     p.add_argument("--prompt-every", type=int, default=6, help="Frames between pose checks while looking for the first frame with a person")
     p.add_argument("--prompt-frame", type=int, help="Start SAM on this frame instead of its shot's first frame with a person")
     p.add_argument("--threshold", type=float, default=0.3, help="Keypoint score to trust and draw (default 0.3)")
