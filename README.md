@@ -469,6 +469,16 @@ For each of R, G and B, the render's brightness levels at 17 even quantiles are 
 
 **Speed**, 4090 box, 8 s 960×720 clip + 1120×864 render, 29 samples: **0.65 s** including Python start-up (the first version seeked with one ffmpeg call per sample: 6.1 s, same curves within the fit's own noise). CPU only.
 
+## Bars · take the black bars out, shot by shot
+
+```bash
+python -m cv_tools.bars --input clip.mp4 --output out.mp4
+# shot 1  00:00.000 - 00:08.367  picture 960x720 at 0,0  no bars
+# shot 2  00:08.367 - 00:15.633  picture 416x720 at 272,0  crop 416x312 at 272,112
+```
+
+Removes letterbox, pillarbox and a picture inside the picture, and keeps the frame size and the sound (H.264 CRF 12, yuv420p). The clip is cut into shots with `shots.py`'s hard-cut detector, then again wherever the bars change without a cut (a dissolve into a narrow picture is invisible to the detector). Per shot, the picture is the union of every frame's lit box (a pixel above 7 in any channel; rows and columns count when 10 % of them are lit), so a dark scene is never mistaken for bars. A shot with no bars passes through; otherwise the largest box with the frame's aspect inside the picture is cropped, centred on the head (Sapiens2 nose, eyes and ears over 16 frames; the picture's middle when nobody is found) and scaled back with lanczos. Every shot keeps the frame size, so the shots join. GPU for the pose, only when a shot has bars. Prints, per shot, the time range, the picture found and the crop used.
+
 ## Layout
 
 ```text
@@ -482,6 +492,7 @@ cv_tools/
   motion_guide.py     Sapiens2 pose + SAM 3.1 + blur + drawing in one pass: the H3 <Video 1> guide
   palette.py          Lab k-means palette, highlight/shadow tint
   color_match.py      Background-only quantile curves from a render to its source, as an ffmpeg curves filter
+  bars.py             Black-bar removal per shot: lit-box union, head-centred crop, scale back to the frame size
   canny.py            Auto-threshold Canny edges
   png_noise.py        PNG's networks without Lightning: tiled one-step noise sampling, finishing looks
   phone_finish.py     Sharpen + PNG grain + JPEG
