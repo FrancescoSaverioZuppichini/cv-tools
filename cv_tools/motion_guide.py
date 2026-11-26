@@ -349,6 +349,8 @@ def run(args):
         texts = [args.mask_prompt] + (["face", "hair"] if args.color else [])
         masks, prompts = track_person(frames, pose, starts, texts, args, timed)
         labels = label_regions(*masks[1:], parts) if args.color else None
+        # [Agent] The face and hair tracks go to masks.npz too: color_match --inside face matches a swap's skin inside them.
+        regions = {"face": masks[1].cpu().numpy(), "hair": masks[2].cpu().numpy()} if args.color else {}
         masks = masks[0]
         lost = empty_runs(masks, [])
         unmasked = sum(end - first for first, end in lost)
@@ -363,7 +365,7 @@ def run(args):
         points, scores = timed("pose_draw_encode", lambda: write_guide(
             args.out / "guide.mp4", frames, masks, pose, args.blur_div, get_fps(args.input), stream, args.mask_grow, args.input,
             part_points(pose, parts), labels))
-    timed("save", lambda: (np.savez_compressed(args.out / "masks.npz", masks=masks.cpu().numpy()),
+    timed("save", lambda: (np.savez_compressed(args.out / "masks.npz", masks=masks.cpu().numpy(), **regions),
                            np.savez_compressed(args.out / "keypoints.npz", points=points, scores=scores,
                                                names=np.array(pose.names))))
     total = sum(seconds.values())
