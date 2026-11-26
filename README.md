@@ -8,7 +8,6 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.sam31` | [Meta SAM 3.1](https://github.com/facebookresearch/sam3) tracker | one object tracked both ways from clicks or a mask; fastest SAM path on the 3090 |
 | `python -m cv_tools.motion_guide` | Sapiens2 pose + SAM 3.1 | the H3 `<Video 1>` guide from a clip: the performer blurred inside her mask, her pose drawn on top |
 | `python -m cv_tools.shots` | ffmpeg scene score | the hard cuts in a clip: `shots.json` (shot start/end frame and `MM:SS.mmm`) and one frame strip per shot, for writing one-shot or multi-shot prompts |
-| `python -m cv_tools.char_sheet` | Sapiens2 pose | a three-column character sheet cut into front body, back body and head, at full resolution |
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
 | `python -m cv_tools.color_match` | quantile curves, or a Lab shift inside a mask | a render's colours to its clip's: the whole frame's grade (an ffmpeg `curves` filter), or her face on a face swap |
 
@@ -35,7 +34,7 @@ Nothing downloads by itself: every tool loads its checkpoint offline from `.mode
 | Tool | Weights |
 |---|---|
 | `motion_guide` | Sapiens2 pose 0.8b + SAM 3.1 |
-| `char_sheet`, `sapiens2.pose` | Sapiens2 pose 0.8b |
+| `sapiens2.pose` | Sapiens2 pose 0.8b |
 | `sam31` | SAM 3.1 |
 | `shots`, `palette`, `color_match` | nothing |
 
@@ -60,7 +59,6 @@ python -m cv_tools.sapiens2.pose --input clip.mp4
 python -m cv_tools.sam31 --input clip.mp4 --frame 141 --points 199,40 203,525
 python -m cv_tools.motion_guide --input clip.mp4 --mask-prompt person
 python -m cv_tools.shots --input clip.mp4 --output runs/shots/clip
-python -m cv_tools.char_sheet --input sheet.png
 python -m cv_tools.palette --input photo.jpg
 python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --end 7.3
 ```
@@ -248,34 +246,6 @@ python -m cv_tools.shots --input clip.mp4 --output runs/shots/clip --cut 0.2   #
 
 Outputs `shots.json` (fps, frames, and per shot its number, start and end frame, `MM:SS.mmm` times and cut score) and `shot-N.png`: every 6th frame of the shot, plus its last, tiled 7 across. A dissolve is not a hard cut, so check the strips. CPU only.
 
-## Character sheet · cut a three-column sheet into its parts
-
-```bash
-python -m cv_tools.char_sheet --input sheet.png
-python -m cv_tools.char_sheet --input sheet.png --output runs/char_sheet/s1004 --grow 1.2 --floor 0.05
-```
-
-Image and CUDA only. The input is a character reference sheet with three columns split by thin white gaps: the full body from the front, the full body from the back, and a column whose top half is a face close-up (the bottom half is ignored). It only crops: nothing is redrawn and every crop keeps the input's full resolution, so upscale the sheet first if you want bigger crops.
-
-1. **Columns.** The gaps are the columns that stay whiter than the studio background from top to bottom. The face panel's divider is often too faint to find; the third column is then split in half.
-2. **Bodies.** Sapiens2 pose on each body column. Both bodies get the same two cuts, so front and back keep the same scale: just under the chin (`--below-chin` of the chin-to-shoulders distance: the head goes, the neck and shoulders stay) and just under the lowest foot point (`--floor` of the body height). The run stops if the top cut would clip the back view's shoulders.
-3. **Head.** Sapiens2's face landmarks frame the box: from `--hair` of the brows-to-chin span above the brows to `--under-chin` below the chin, `--aspect` wide, grown by `--grow` around its centre. It is centred between the eyes and kept symmetric inside the panel, so the face is always in the middle.
-
-| Flag | Meaning |
-|---|---|
-| `--pose-model 0.8b` | Sapiens2 pose size (`0.4b`, `0.8b`, `1b`, `5b`) or a checkpoint path |
-| `--score 0.3` | Keypoint confidence to trust |
-| `--below-chin 0.1` | Body top cut under the chin, as a share of chin-to-shoulders |
-| `--floor 0.03` | Floor kept under the lowest foot point, as a share of the body height |
-| `--hair 0.75` | Head top above the brows, as a share of brows-to-chin |
-| `--under-chin 0.12` | Head bottom under the chin, as a share of brows-to-chin |
-| `--aspect 0.8` | Head width over height |
-| `--grow 1.12` | Head box scale around its centre (1 = the tight box) |
-
-Of the shared flags, `--input`, `--output` and `--device` apply.
-
-Outputs `front.png`, `back.png` and `head.png` at full resolution, `proof.jpg` (the sheet with every pose point and cut drawn) and `summary.json` (the columns, chin, shoulders, lowest foot point, the cut rows, the head box, how far the face sits from its centre, and the settings).
-
 ## Palette · colours and light
 
 ```bash
@@ -365,7 +335,6 @@ cv_tools/
   sam31.py            SAM 3.1 tracker: load_tracker(), read_video(), track() for other tools; its CLI is run()/main()
   motion_guide.py     Sapiens2 pose + SAM 3.1 + blur + drawing in one pass: the H3 <Video 1> guide
   shots.py            Hard cuts by ffmpeg scene score, shots.json and a frame strip per shot
-  char_sheet.py       A three-column character sheet cut into front, back and head with Sapiens2 pose
   palette.py          Lab k-means palette, highlight/shadow tint
   color_match.py      A render's colour to its source's: background curves as an ffmpeg filter, or a per-frame shift inside a mask
   sapiens2/
