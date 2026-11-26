@@ -295,12 +295,22 @@ Colours are k-means clusters in CIE Lab, where distance follows perceived differ
 
 ## Colour match · give a render its source's colours
 
+Two jobs, one tool:
+
+| The render | Run | What changes |
+|---|---|---|
+| Lost the clip's light or grade (a night tint, a warm filter) | the grade (default) | the whole frame, by curves fitted on the background |
+| A face swap whose face is not the colour of the body under it | `--inside face` | her face skin only: red and yellow, brightness kept |
+
+**Relight a swap to its clip** (the grade). It prints an ffmpeg `curves` filter; ffmpeg applies it:
+
 ```bash
-python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --end 7.3
+F=$(python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --end 7.3)
 # stderr: color_match: 29 samples, 783032 px, largest shift r 9, g 14, b 37 levels
-# stdout: curves=r='0.0000/0.0000 0.0625/...':g='...':b='...'
-ffmpeg -i swap.mp4 -vf "$(python -m cv_tools.color_match ... )" -c:a copy matched.mp4
+ffmpeg -i swap.mp4 -vf "$F" -c:a copy swap-relit.mp4
 ```
+
+`guide/masks.npz` is the swap's own `motion_guide` output: her mask keeps the new person out of the fit.
 
 | Flag | Meaning |
 |---|---|
@@ -316,13 +326,15 @@ For each of R, G and B, the render's brightness levels at 17 even quantiles are 
 
 **Speed**, 4090 box, 8 s 960×720 clip + 1120×864 render, 29 samples: **0.65 s** including Python start-up (the first version seeked with one ffmpeg call per sample: 6.1 s, same curves within the fit's own noise). CPU only.
 
-**Inside a mask** (a face swap's skin to the source's):
+**Tone her face on a face swap** (`--inside face`). `motion_guide --color` saves SAM 3.1's `face` and `hair` masks of the clip; `color_match` tones her face inside the `face` one:
 
 ```bash
-python -m cv_tools.motion_guide --input clip.mp4 --output guide --color        # masks.npz gets face and hair
-python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --inside face --out swap-toned.mp4
-# stderr: color_match: face measured on 243/243 frames, shift red +2.9..+4.5, yellow +2.4..+4.0 (Lab a*, b*)
+python -m cv_tools.motion_guide --input clip.mp4 --output clip-masks --mask-prompt person --color   # ~60 s on the 4090
+python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks clip-masks/masks.npz --inside face --out swap-toned.mp4
+# stderr: color_match: face measured on 243/243 frames, shift red +3.0..+4.5, yellow +2.3..+4.0 (Lab a*, b*)
 ```
+
+Face swaps only. On a character swap her face and body come from the same reference; toning her face to the original woman's turned it redder than her own body (peek, red +10).
 
 | Flag | Meaning |
 |---|---|
@@ -333,7 +345,7 @@ python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide
 
 Every render frame is paired with the source frame at the same time. Both are measured at the 320 px sample width (`--width`), inside the source's mask shrunk 7 px there so hair and background at its edge stay out, on colourful pixels only: skin counts; grey or ash hair, brows, lashes and eye whites do not. The difference of the mean Lab a\* and b\* (red, yellow) is the frame's shift. A moving median over 0.5 s keeps a light change and drops flicker. The shift goes back on the mask, feathered 41 px and weighted the same way, so brightness stays the render's and the pixels outside go to the encoder unchanged (measured drift outside the face: 0.03 Lab, from x264 alone). Decoding and encoding use ffmpeg's exact rounding with BT.709 tags; its default rounding darkened every pixel by about 2 levels on the round trip.
 
-**Speed**, RTX 3090 box, 10 s 736×1312 render: **14 s** including Python start-up. CPU only.
+**Speed**, including Python start-up, CPU only: **12.8 s** for a 13.7 s 1312×736 render on the 4090 box, **14 s** for a 10 s 736×1312 one on the 3090 box.
 
 ## Bars · take the black bars out, shot by shot
 
