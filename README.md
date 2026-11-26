@@ -10,7 +10,7 @@ Local image/video inference. Every tool is one Python file you run directly; the
 | `python -m cv_tools.shots` | ffmpeg scene score | the hard cuts in a clip: `shots.json` (shot start/end frame and `MM:SS.mmm`) and one frame strip per shot, for writing one-shot or multi-shot prompts |
 | `python -m cv_tools.char_sheet` | Sapiens2 pose | a three-column character sheet cut into front body, back body and head, at full resolution |
 | `python -m cv_tools.palette` | k-means in Lab | dominant colours, highlight and shadow tint, printed to the terminal |
-| `python -m cv_tools.color_match` | quantile curves on background pixels, or a Lab shift inside a mask | an ffmpeg `curves` filter that gives a render its source clip's colour grade, or the render with one region (the face) toned to the source's |
+| `python -m cv_tools.color_match` | quantile curves, or a Lab shift inside a mask | a render's colours to its clip's: the whole frame's grade (an ffmpeg `curves` filter), or her face on a face swap |
 
 Every file takes `--help`.
 
@@ -37,7 +37,6 @@ Nothing downloads by itself: every tool loads its checkpoint offline from `.mode
 | `motion_guide` | Sapiens2 pose 0.8b + SAM 3.1 |
 | `char_sheet`, `sapiens2.pose` | Sapiens2 pose 0.8b |
 | `sam31` | SAM 3.1 |
-| `bars` | Sapiens2 pose 0.8b, only when a shot has bars |
 | `shots`, `palette`, `color_match` | nothing |
 
 ```bash
@@ -48,7 +47,6 @@ hf download facebook/sapiens2-pose-0.8b config.json preprocessor_config.json mod
 # (Or the gated facebook/sam3.1 download: sam3.1_multiplex.pt into .models/sam3.1/.)
 mkdir -p .models/sam3.1
 python -c "import torch; from safetensors.torch import load_file; torch.save({'model': load_file('<ComfyUI>/models/checkpoints/sam3.1_multiplex_fp16.safetensors')}, '.models/sam3.1/sam3.1_multiplex.pt')"
-
 ```
 
 The first CUDA run of a Sapiens2 size builds its TensorRT engine into `engines/` (a couple of minutes, once per GPU).
@@ -59,10 +57,12 @@ The first CUDA run of a Sapiens2 size builds its TensorRT engine into `engines/`
 source .venv/bin/activate
 
 python -m cv_tools.sapiens2.pose --input clip.mp4
-python -m cv_tools.palette --input photo.jpg
 python -m cv_tools.sam31 --input clip.mp4 --frame 141 --points 199,40 203,525
-python -m cv_tools.motion_guide --input clip.mp4
+python -m cv_tools.motion_guide --input clip.mp4 --mask-prompt person
+python -m cv_tools.shots --input clip.mp4 --output runs/shots/clip
 python -m cv_tools.char_sheet --input sheet.png
+python -m cv_tools.palette --input photo.jpg
+python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide/masks.npz --end 7.3
 ```
 
 ## Model tools: shared flags and outputs
@@ -168,14 +168,13 @@ Masks match ComfyUI's SAM 3.1 node (IoU 0.99 at stride 1, 0.985 at stride 2) at 
 ## Motion guide · the H3 `<Video 1>` guide from a clip
 
 ```bash
-python -m cv_tools.motion_guide --input reel.mp4 --output runs/motion_guide/reel
-python -m cv_tools.motion_guide --input reel.mp4 --size 0.5 --face none
-python -m cv_tools.motion_guide --input reel.mp4 --pose-model 0.8b   # bigger Sapiens2 pose; its engine builds on first use
-python -m cv_tools.motion_guide --input reel.mp4 --mask-prompt person --mask-grow 0.05   # SAM 3 text mask as the seed, wider blur
+python -m cv_tools.motion_guide --input reel.mp4 --output runs/motion_guide/reel --mask-prompt person --mask-grow 0 --color   # character swap
 python -m cv_tools.motion_guide --input selfie.mp4 --mask-prompt "head, hair" --mask-grow 0.02 --include head,face   # face swap: head lines + brow/mouth dots only
 python -m cv_tools.motion_guide --input reel.mp4 --mask-prompt person --exclude legs   # waist-up clip: no leg lines
-python -m cv_tools.motion_guide --input reel.mp4 --include head,face,hands   # head, face dots and hands, no body skeleton
+python -m cv_tools.motion_guide --input reel.mp4 --mask-prompt person --size 0.5 --face none   # half size, no face dots
 ```
+
+Always pass `--mask-prompt`. Without it the track starts from her joint clicks alone, and on a close-up selfie those cover only her face.
 
 Video and CUDA only; `--benchmark` is refused (`summary.json` already times every stage).
 
@@ -215,10 +214,6 @@ Outputs `guide.mp4` (the `<Video 1>` to feed H3), `masks.npz`, `keypoints.npz` (
 
 **`--color`** mixes a flat tint into the blur (55 %, before the drawing goes on), so H3 can tell her parts apart under it: face green, hair red, the rest of her blue. A region is tinted only when its part is drawn: `face` → face, `head` → hair, `torso`/`arms`/`hands`/`legs` → body. Face and hair are SAM 3 `face` / `hair` tracks, prompted per shot and re-prompted like the main mask, each in its own tracker state stepping with the main one, so the image encoder still runs once. `masks.npz` keeps the blur mask as `masks` and adds the `face` and `hair` tracks (what `color_match --inside` reads); without the flag the guide is unchanged.
 
-```bash
-python -m cv_tools.motion_guide --input clip.mp4 --mask-prompt person --mask-grow 0 --color   # face swap: --mask-prompt "head, hair" --include head,face --color
-```
-
 RTX 4090, upright-full (428 frames, 1024×576): 44.6 s → 50.4 s with `--color` (track 13.8 → 19.5 s, peak VRAM 6.1 → 7.9 GB); the old flow (three `motion_guide` runs + a tinting pass) took 145 s.
 
 **Benchmark vs the ComfyUI pipeline it replaces**: `persontrack.py` (DWPose + MediaPipe + SAM 3.1 node, run twice) then `vidprep2.py` (DWPose again, CPU blur, drawing). RTX 3090, same clips, back to back, 13 Nov 2026.
@@ -236,9 +231,22 @@ Where the old pipeline lost its time:
 - **MediaPipe:** run only for comparison.
 - **ComfyUI round trips:** per-frame PNGs.
 
-**Known gaps:**
-- No re-prompting yet. The old tracker re-prompted failing stretches; this costs the bridge's first entrance frame.
-- Peak VRAM is higher: SAM's 8-frame encoder batch plus PyTorch's cache, with the pose engine loaded.
+**Known gap:** peak VRAM is higher: SAM's 8-frame encoder batch plus PyTorch's cache, with the pose engine loaded.
+
+## Shots · find the hard cuts
+
+```bash
+python -m cv_tools.shots --input clip.mp4 --output runs/shots/clip
+python -m cv_tools.shots --input clip.mp4 --output runs/shots/clip --cut 0.2   # catch softer cuts
+```
+
+| Flag | Meaning |
+|---|---|
+| `--input`, `--output` | The clip, and the folder for `shots.json` and the strips; both required |
+| `--cut 0.3` | ffmpeg scene score that starts a new shot. Single-shot phone clips peak at 0.14, a real cut scored 0.53 |
+| `--min-shot 12` | Shortest shot in frames; a cut closer than this to the last one is ignored |
+
+Outputs `shots.json` (fps, frames, and per shot its number, start and end frame, `MM:SS.mmm` times and cut score) and `shot-N.png`: every 6th frame of the shot, plus its last, tiled 7 across. A dissolve is not a hard cut, so check the strips. CPU only.
 
 ## Character sheet · cut a three-column sheet into its parts
 
@@ -347,16 +355,6 @@ Every render frame is paired with the source frame at the same time. Both are me
 
 **Speed**, including Python start-up, CPU only: **12.8 s** for a 13.7 s 1312×736 render on the 4090 box, **14 s** for a 10 s 736×1312 one on the 3090 box.
 
-## Bars · take the black bars out, shot by shot
-
-```bash
-python -m cv_tools.bars --input clip.mp4 --output out.mp4
-# shot 1  00:00.000 - 00:08.367  picture 960x720 at 0,0  no bars
-# shot 2  00:08.367 - 00:15.633  picture 416x720 at 272,0  crop 416x312 at 272,112
-```
-
-Removes letterbox, pillarbox and a picture inside the picture, and keeps the frame size and the sound (H.264 CRF 12, yuv420p). The clip is cut into shots with `shots.py`'s hard-cut detector, then again wherever the bars change without a cut (a dissolve into a narrow picture is invisible to the detector). Per shot, the picture is the union of every frame's lit box (a pixel above 7 in any channel; rows and columns count when 10 % of them are lit), so a dark scene is never mistaken for bars. A shot with no bars passes through; otherwise the largest box with the frame's aspect inside the picture is cropped, centred on the head (Sapiens2 nose, eyes and ears over 16 frames; the picture's middle when nobody is found) and scaled back with lanczos. Every shot keeps the frame size, so the shots join. GPU for the pose, only when a shot has bars. Prints, per shot, the time range, the picture found and the crop used.
-
 ## Layout
 
 ```text
@@ -366,9 +364,10 @@ cv_tools/
   tensorrt.py         ONNX export to a static, strongly typed FP16 engine; engine runtime
   sam31.py            SAM 3.1 tracker: load_tracker(), read_video(), track() for other tools; its CLI is run()/main()
   motion_guide.py     Sapiens2 pose + SAM 3.1 + blur + drawing in one pass: the H3 <Video 1> guide
+  shots.py            Hard cuts by ffmpeg scene score, shots.json and a frame strip per shot
+  char_sheet.py       A three-column character sheet cut into front, back and head with Sapiens2 pose
   palette.py          Lab k-means palette, highlight/shadow tint
   color_match.py      A render's colour to its source's: background curves as an ffmpeg filter, or a per-frame shift inside a mask
-  bars.py             Black-bar removal per shot: lit-box union, head-centred crop, scale back to the frame size
   sapiens2/
     pose.py           GPU crop, TensorRT/PyTorch forward, DARK refinement, Sapiens and DWPose drawing
     temporal.py       Timestamp sampling, confidence-gated interpolation
