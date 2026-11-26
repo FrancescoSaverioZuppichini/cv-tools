@@ -21,7 +21,7 @@ def run(cmd):
 
 
 def scene_scores(path):
-    out = run(["ffmpeg", "-v", "error", "-i", str(path), "-an", "-vf", "select='gte(scene,0)',metadata=print:file=-", "-f", "null", "-"])
+    out = run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-an", "-vf", "select='gte(scene,0)',metadata=print:file=-", "-f", "null", "-"])
     return [float(x) for x in re.findall(r"scene_score=([\d.]+)", out)]
 
 
@@ -43,7 +43,7 @@ def strip(path, a, b, out):
     idx = sorted(set(range(a, b, EVERY)) | {b - 1})
     cols = min(7, len(idx))
     sel = "+".join(f"eq(n\\,{i})" for i in idx)
-    run(["ffmpeg", "-v", "error", "-y", "-i", str(path), "-an", "-vf", f"select={sel},scale=480:-2,tile={cols}x{-(-len(idx) // cols)}",
+    run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path), "-an", "-vf", f"select={sel},scale=480:-2,tile={cols}x{-(-len(idx) // cols)}",
          "-frames:v", "1", "-vsync", "0", str(out)])
     return idx
 

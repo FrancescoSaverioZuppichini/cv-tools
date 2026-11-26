@@ -139,7 +139,7 @@ def main():
             print(f"shot {len(shots)}  {stamp(s / fps)} - {stamp(e / fps)}  picture {picture[2]}x{picture[3]} at {picture[0]},{picture[1]}  "
                   + (f"crop {crop[2]}x{crop[3]} at {crop[0]},{crop[1]}" if crop else "no bars"))
 
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(args.input), "-filter_complex", join_filter(shots, size), "-map", "[v]", "-map", "0:a?",
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(args.input), "-filter_complex", join_filter(shots, size), "-map", "[v]", "-map", "0:a?",
                     "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "copy", str(args.output)], check=True, stdin=subprocess.DEVNULL)
 
 
