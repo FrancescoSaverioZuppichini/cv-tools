@@ -15,7 +15,7 @@ dependencies = [
   "Pillow>=10",
   "numpy>=2,<3",
   # [Agent] Meta's SAM 3 code is installed with --no-deps (its numpy<2 pin would break everything else), so its imports
-  # are listed here. timm, einops and omegaconf also cover the PNG noise networks and their checkpoint config.
+  # are listed here.
   "timm>=1.0",
   "einops>=0.8",
   "ftfy",

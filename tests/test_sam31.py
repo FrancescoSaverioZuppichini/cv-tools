@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from cv_tools.sam3 import encode_rle
+from cv_tools.sam31 import encode_rle
 
 
 def decode_rle(rle):

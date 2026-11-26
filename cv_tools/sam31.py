@@ -12,11 +12,42 @@ import torch.nn.functional as F
 from cv_tools import MODEL_DIR
 from cv_tools.cli import measure, parse, write_summary
 from cv_tools.media import Frame, get_fps, read_frames, write_run
-from cv_tools.sam3 import draw, encode_rle
 
 CHECKPOINT = MODEL_DIR / "sam3.1" / "sam3.1_multiplex.pt"
 DTYPE = torch.float16
 MATRIX_LAYERS = (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.ConvTranspose2d)
+
+
+def encode_rle(mask):
+    # [Agent] COCO uncompressed RLE: run lengths over the column-major mask, starting with a background run,
+    # [Agent] so pycocotools decodes it losslessly. The MP4 masks are lossy and only for viewing.
+    flat = mask.ravel(order="F")
+    edges = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+    counts = np.diff(np.concatenate([[0], edges, [flat.size]]))
+    if flat[0]:
+        counts = np.concatenate([[0], counts])
+    return {"size": list(mask.shape), "counts": counts.tolist()}
+
+
+def get_color(object_id):
+    # [Agent] Golden-ratio hue steps keep neighbouring IDs far apart, and an ID keeps its colour across frames.
+    hue = int((object_id * 0.618034 % 1) * 180)
+    return tuple(int(c) for c in cv2.cvtColor(np.uint8([[[hue, 220, 255]]]), cv2.COLOR_HSV2BGR)[0, 0])
+
+
+def draw(image, objects, alpha):
+    overlay = image.copy()
+    masks = np.zeros_like(image)
+    for obj in objects:
+        color, mask = get_color(obj["id"]), obj["mask"]
+        masks[mask] = color
+        overlay[mask] = (overlay[mask] * (1 - alpha) + np.array(color) * alpha).astype(np.uint8)
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, color, 2, cv2.LINE_AA)
+        x, y = int(obj["box"][0]), max(int(obj["box"][1]) - 6, 12)
+        cv2.putText(overlay, f"{obj['prompt']} #{obj['id']} {obj['score']:.2f}", (x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    return overlay, masks
 
 
 @contextmanager
