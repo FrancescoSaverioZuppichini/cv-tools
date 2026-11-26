@@ -329,8 +329,9 @@ python -m cv_tools.color_match --source clip.mp4 --render swap.mp4 --masks guide
 | `--inside face` | The `masks.npz` key to match inside (`face`, `hair`, `masks`) |
 | `--out PATH` | The matched render; its sound is copied |
 | `--strength 1` | Scales the shift |
+| `--width 320` | Measuring width; the shift goes back on the full-size render |
 
-Every render frame is paired with the source frame at the same time. Both are measured inside the source's mask (shrunk 15 px, so hair and background at its edge stay out), on colourful pixels only: skin counts; grey or ash hair, brows, lashes and eye whites do not. The difference of the mean Lab a\* and b\* (red, yellow) is the frame's shift. A moving median over 0.5 s keeps a light change and drops flicker. The shift goes back on the mask, feathered 41 px and weighted the same way, so brightness stays the render's and the pixels outside go to the encoder unchanged (measured drift outside the face: 0.03 Lab, from x264 alone). Decoding and encoding use ffmpeg's exact rounding with BT.709 tags; its default rounding darkened every pixel by about 2 levels on the round trip.
+Every render frame is paired with the source frame at the same time. Both are measured at the 320 px sample width (`--width`), inside the source's mask shrunk 7 px there so hair and background at its edge stay out, on colourful pixels only: skin counts; grey or ash hair, brows, lashes and eye whites do not. The difference of the mean Lab a\* and b\* (red, yellow) is the frame's shift. A moving median over 0.5 s keeps a light change and drops flicker. The shift goes back on the mask, feathered 41 px and weighted the same way, so brightness stays the render's and the pixels outside go to the encoder unchanged (measured drift outside the face: 0.03 Lab, from x264 alone). Decoding and encoding use ffmpeg's exact rounding with BT.709 tags; its default rounding darkened every pixel by about 2 levels on the round trip.
 
 **Speed**, RTX 3090 box, 10 s 736×1312 render: **14 s** including Python start-up. CPU only.
 

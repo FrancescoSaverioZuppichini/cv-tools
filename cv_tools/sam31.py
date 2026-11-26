@@ -15,39 +15,8 @@ from cv_tools.media import Frame, get_fps, read_frames, write_run
 
 CHECKPOINT = MODEL_DIR / "sam3.1" / "sam3.1_multiplex.pt"
 DTYPE = torch.float16
+COLOR = (255, 140, 30)  # BGR, the overlay tint
 MATRIX_LAYERS = (torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.ConvTranspose2d)
-
-
-def encode_rle(mask):
-    # [Agent] COCO uncompressed RLE: run lengths over the column-major mask, starting with a background run,
-    # [Agent] so pycocotools decodes it losslessly. The MP4 masks are lossy and only for viewing.
-    flat = mask.ravel(order="F")
-    edges = np.flatnonzero(flat[1:] != flat[:-1]) + 1
-    counts = np.diff(np.concatenate([[0], edges, [flat.size]]))
-    if flat[0]:
-        counts = np.concatenate([[0], counts])
-    return {"size": list(mask.shape), "counts": counts.tolist()}
-
-
-def get_color(object_id):
-    # [Agent] Golden-ratio hue steps keep neighbouring IDs far apart, and an ID keeps its colour across frames.
-    hue = int((object_id * 0.618034 % 1) * 180)
-    return tuple(int(c) for c in cv2.cvtColor(np.uint8([[[hue, 220, 255]]]), cv2.COLOR_HSV2BGR)[0, 0])
-
-
-def draw(image, objects, alpha):
-    overlay = image.copy()
-    masks = np.zeros_like(image)
-    for obj in objects:
-        color, mask = get_color(obj["id"]), obj["mask"]
-        masks[mask] = color
-        overlay[mask] = (overlay[mask] * (1 - alpha) + np.array(color) * alpha).astype(np.uint8)
-        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, color, 2, cv2.LINE_AA)
-        x, y = int(obj["box"][0]), max(int(obj["box"][1]) - 6, 12)
-        cv2.putText(overlay, f"{obj['prompt']} #{obj['id']} {obj['score']:.2f}", (x, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
-    return overlay, masks
 
 
 @contextmanager
@@ -211,6 +180,27 @@ def track(model, frames, prompt_frame, prompts, direction="both", stride=2, batc
     return out, seconds
 
 
+def encode_rle(mask):
+    # [Agent] COCO uncompressed RLE: run lengths over the column-major mask, starting with a background run,
+    # [Agent] so pycocotools decodes it losslessly. The MP4 masks are lossy and only for viewing.
+    flat = mask.ravel(order="F")
+    edges = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+    counts = np.diff(np.concatenate([[0], edges, [flat.size]]))
+    if flat[0]:
+        counts = np.concatenate([[0], counts])
+    return {"size": list(mask.shape), "counts": counts.tolist()}
+
+
+def draw(image, mask, alpha):
+    """(overlay, mask picture) of the tracked object: tinted and outlined on the frame, flat on black."""
+    overlay, picture = image.copy(), np.zeros_like(image)
+    picture[mask] = COLOR
+    overlay[mask] = (overlay[mask] * (1 - alpha) + np.array(COLOR) * alpha).astype(np.uint8)
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(overlay, contours, -1, COLOR, 2, cv2.LINE_AA)
+    return overlay, picture
+
+
 def points_from(values):
     return [tuple(float(v) for v in point.split(",")) for point in values or []]
 
@@ -229,13 +219,10 @@ def process(model, frames, args, destination, fps):
     def render(frame, index):
         m = masks[index]
         ys, xs = np.nonzero(m)
-        # [Agent] sam3.draw expects detector objects; "prompt" and "score" are only its labels.
-        objects = [{"id": 1, "prompt": "track", "score": 1.0, "mask": m,
-                    "box": [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]}] if len(xs) else []
-        overlay, coloured = draw(frame.image, objects, args.alpha)
-        record = {"frame": index, "timestamp_seconds": frame.timestamp,
-                  "objects": [{"id": 1, "box_xyxy": o["box"], "area": int(m.sum()), "rle": encode_rle(m)} for o in objects]}
-        return record, {"overlay.mp4": overlay, "masks.mp4": coloured}
+        objects = [{"id": 1, "box_xyxy": [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())],
+                    "area": int(m.sum()), "rle": encode_rle(m)}] if len(xs) else []
+        overlay, picture = draw(frame.image, m, args.alpha)
+        return {"frame": index, "timestamp_seconds": frame.timestamp, "objects": objects}, {"overlay.mp4": overlay, "masks.mp4": picture}
 
     written = write_run(destination, (Frame(i, i / fps, f) for i, f in enumerate(frames)), render, fps, "masks.jsonl")
     # [Agent] The run's speed is tracking over the frames it covered (tracked or filled), so strides compare fairly.
